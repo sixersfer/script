@@ -1,0 +1,2700 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+local CoreGui = game:GetService("CoreGui")
+local Workspace = game:GetService("Workspace")
+local StarterGui = game:GetService("StarterGui")
+local TweenService = game:GetService("TweenService")
+
+local LP = Players.LocalPlayer
+local genv = (getgenv and getgenv()) or _G
+
+if genv.__EmoteStudioCleanup then
+    pcall(genv.__EmoteStudioCleanup)
+end
+
+local CFG = {
+    PER_PAGE = 20,
+    CATEGORY = 12,
+    EMOTE_SUB = 39,
+    BUNDLE_SUB = 38,
+    SAVE_FILE = "EmoteStudio_v4.json",
+    SLOTS = 8,
+    MAX_PAGES = 12,
+    MAX_PRESETS = 30,
+    MIN_W = 640,
+    MIN_H = 400,
+    DEF_W = 800,
+    DEF_H = 460,
+    LEFT_W = 240,
+    DETAIL_W = 188,
+    TITLE_FONT = Enum.Font.Garamond,
+    IDLE = "rbxassetid://507766388",
+}
+
+local C = {
+    bg = Color3.fromRGB(12, 15, 13),
+    panel = Color3.fromRGB(20, 25, 22),
+    panel2 = Color3.fromRGB(27, 34, 29),
+    gold = Color3.fromRGB(214, 170, 90),
+    cream = Color3.fromRGB(232, 222, 200),
+    dim = Color3.fromRGB(150, 152, 138),
+    red = Color3.fromRGB(205, 95, 85),
+    green = Color3.fromRGB(125, 195, 125),
+}
+
+local alive = true
+local conns = {}
+
+local function bind(signal, fn)
+    local c = signal:Connect(fn)
+    conns[#conns + 1] = c
+    return c
+end
+
+local function new(class, props, children)
+    local o = Instance.new(class)
+    local parent
+    for k, v in pairs(props or {}) do
+        if k == "Parent" then
+            parent = v
+        else
+            o[k] = v
+        end
+    end
+    for _, c in ipairs(children or {}) do
+        c.Parent = o
+    end
+    if parent then
+        o.Parent = parent
+    end
+    return o
+end
+
+local function with(defaults, props)
+    local t = {}
+    for k, v in pairs(defaults) do
+        t[k] = v
+    end
+    for k, v in pairs(props or {}) do
+        t[k] = v
+    end
+    return t
+end
+
+local function corner(o, r)
+    return new("UICorner", {CornerRadius = UDim.new(0, r or 6), Parent = o})
+end
+
+local function stroke(o, col, th, tr)
+    return new("UIStroke", {
+        Color = col or C.gold,
+        Thickness = th or 1,
+        Transparency = tr or 0.6,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+        Parent = o,
+    })
+end
+
+local function pad(o, l, t, r, b)
+    return new("UIPadding", {
+        PaddingLeft = UDim.new(0, l),
+        PaddingTop = UDim.new(0, t),
+        PaddingRight = UDim.new(0, r),
+        PaddingBottom = UDim.new(0, b),
+        Parent = o,
+    })
+end
+
+local function label(p)
+    return new("TextLabel", with({
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        Font = Enum.Font.Gotham,
+        TextSize = 12,
+        TextColor3 = C.cream,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Text = "",
+    }, p))
+end
+
+local function button(p)
+    local b = new("TextButton", with({
+        BackgroundColor3 = C.panel2,
+        BorderSizePixel = 0,
+        AutoButtonColor = false,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 12,
+        TextColor3 = C.cream,
+        Text = "",
+    }, p))
+    corner(b, 5)
+    local s = stroke(b, C.gold, 1, 0.7)
+    s.Name = "S"
+    b.MouseEnter:Connect(function()
+        if not b:GetAttribute("A") then
+            s.Transparency = 0.35
+        end
+    end)
+    b.MouseLeave:Connect(function()
+        s.Transparency = b:GetAttribute("A") and 0 or 0.7
+    end)
+    return b
+end
+
+local function setActive(b, on)
+    on = on and true or false
+    b:SetAttribute("A", on)
+    local s = b:FindFirstChild("S")
+    if s then
+        s.Transparency = on and 0 or 0.7
+    end
+    b.TextColor3 = on and C.gold or C.cream
+end
+
+local function confirmClick(btn, fn)
+    local armed = false
+    local base = btn.Text
+    btn.MouseButton1Click:Connect(function()
+        if armed then
+            armed = false
+            btn.Text = base
+            btn.TextColor3 = C.cream
+            fn()
+            return
+        end
+        armed = true
+        btn.Text = "Confirm?"
+        btn.TextColor3 = C.red
+        task.delay(2, function()
+            if armed then
+                armed = false
+                btn.Text = base
+                btn.TextColor3 = C.cream
+            end
+        end)
+    end)
+end
+
+local function idStr(v)
+    if type(v) == "number" then
+        return string.format("%.0f", v)
+    end
+    return tostring(v)
+end
+
+local function rid(v)
+    return "rbxassetid://" .. idStr(v)
+end
+
+local function thumbUrl(id, bundle)
+    return string.format("rbxthumb://type=%s&id=%s&w=150&h=150", bundle and "BundleThumbnail" or "Asset", idStr(id))
+end
+
+local function numOf(s)
+    return tostring(s):match("%d+")
+end
+
+local function copy(text)
+    local fn = setclipboard or toclipboard or (syn and syn.write_clipboard)
+    if fn then
+        pcall(fn, tostring(text))
+        return true
+    end
+    return false
+end
+
+local function guiParent()
+    if gethui then
+        local ok, h = pcall(gethui)
+        if ok and h then
+            return h
+        end
+    end
+    local ok = pcall(function()
+        return CoreGui.Name
+    end)
+    if ok then
+        return CoreGui
+    end
+    return LP:WaitForChild("PlayerGui")
+end
+
+local function vsize()
+    local cam = Workspace.CurrentCamera
+    return cam and cam.ViewportSize or Vector2.new(1280, 720)
+end
+
+local DEFAULT_KEYS = {toggle = "RightShift", wheel = "B", prev = "Q", next = "E"}
+
+local store = {
+    pages = {{}},
+    loadout = {},
+    presets = {},
+    page = 1,
+    slot = 1,
+    tab = "Emotes",
+    auto = true,
+    enforce = true,
+    closeOnPlay = true,
+    stopOnMove = true,
+    speed = 1,
+    loop = true,
+    keys = {},
+    win = nil,
+}
+for k, v in pairs(DEFAULT_KEYS) do
+    store.keys[k] = v
+end
+
+local STATES = {
+    {key = "idle", label = "Idle", folder = "idle", children = {"Animation1", "Animation2"}},
+    {key = "walk", label = "Walk", folder = "walk", children = {"WalkAnim"}},
+    {key = "run", label = "Run", folder = "run", children = {"RunAnim"}},
+    {key = "jump", label = "Jump", folder = "jump", children = {"JumpAnim"}},
+    {key = "fall", label = "Fall", folder = "fall", children = {"FallAnim"}},
+    {key = "climb", label = "Climb", folder = "climb", children = {"ClimbAnim"}},
+    {key = "swim", label = "Swim", folder = "swim", children = {"Swim"}},
+    {key = "swimidle", label = "S.Idle", folder = "swimidle", children = {"SwimIdle"}},
+}
+local STATE_BY_KEY = {}
+for _, s in ipairs(STATES) do
+    STATE_BY_KEY[s.key] = s
+end
+
+-- Sanitizes / deep-copies a loadout table (used for loading from disk and for presets).
+local function readLoadout(src)
+    local out = {}
+    if type(src) == "table" then
+        for _, def in ipairs(STATES) do
+            local v = src[def.key]
+            if type(v) == "table" and type(v.id) == "string" then
+                out[def.key] = {
+                    id = v.id,
+                    id2 = type(v.id2) == "string" and v.id2 or nil,
+                    name = tostring(v.name or "Custom"),
+                }
+            end
+        end
+    end
+    return out
+end
+
+local canFile = type(isfile) == "function" and type(readfile) == "function" and type(writefile) == "function"
+local saveToken = 0
+
+local function serialize()
+    local pgs = {}
+    for i, pg in ipairs(store.pages) do
+        local o = {}
+        for s = 1, CFG.SLOTS do
+            local e = pg[s]
+            if e then
+                o[tostring(s)] = {id = idStr(e.id), name = e.name, direct = e.direct == true}
+            end
+        end
+        pgs[i] = o
+    end
+    local lo = {}
+    for k, v in pairs(store.loadout) do
+        lo[k] = {id = v.id, id2 = v.id2, name = v.name}
+    end
+    local prs = {}
+    for i, p in ipairs(store.presets) do
+        local plo = {}
+        for k, v in pairs(p.loadout) do
+            plo[k] = {id = v.id, id2 = v.id2, name = v.name}
+        end
+        prs[i] = {name = p.name, loadout = plo}
+    end
+    return {
+        version = 4,
+        pages = pgs,
+        loadout = lo,
+        presets = prs,
+        page = store.page,
+        slot = store.slot,
+        tab = store.tab,
+        auto = store.auto,
+        enforce = store.enforce,
+        closeOnPlay = store.closeOnPlay,
+        stopOnMove = store.stopOnMove,
+        speed = store.speed,
+        loop = store.loop,
+        keys = store.keys,
+        win = store.win,
+    }
+end
+
+local function saveNow()
+    if not canFile then
+        return
+    end
+    pcall(function()
+        writefile(CFG.SAVE_FILE, HttpService:JSONEncode(serialize()))
+    end)
+end
+
+local function save()
+    if not canFile then
+        return
+    end
+    saveToken += 1
+    local t = saveToken
+    task.delay(0.4, function()
+        if t ~= saveToken or not alive then
+            return
+        end
+        saveNow()
+    end)
+end
+
+local function keyFromName(n)
+    local ok, v = pcall(function()
+        return Enum.KeyCode[n]
+    end)
+    if ok then
+        return v
+    end
+end
+
+local function loadStore()
+    if not canFile then
+        return
+    end
+    local ok, raw = pcall(function()
+        if isfile(CFG.SAVE_FILE) then
+            return readfile(CFG.SAVE_FILE)
+        end
+    end)
+    if not ok or type(raw) ~= "string" then
+        return
+    end
+    local ok2, d = pcall(function()
+        return HttpService:JSONDecode(raw)
+    end)
+    if not ok2 or type(d) ~= "table" then
+        return
+    end
+    if type(d.pages) == "table" then
+        local pgs = {}
+        for i, pg in ipairs(d.pages) do
+            if i > CFG.MAX_PAGES then
+                break
+            end
+            local p = {}
+            if type(pg) == "table" then
+                for k, e in pairs(pg) do
+                    local n = tonumber(k)
+                    if n and n >= 1 and n <= CFG.SLOTS and type(e) == "table" and e.id then
+                        p[n] = {id = idStr(e.id), name = tostring(e.name or e.id), direct = e.direct == true}
+                    end
+                end
+            end
+            pgs[i] = p
+        end
+        if #pgs > 0 then
+            store.pages = pgs
+        end
+    end
+    if type(d.loadout) == "table" then
+        store.loadout = readLoadout(d.loadout)
+    end
+    if type(d.presets) == "table" then
+        for i, p in ipairs(d.presets) do
+            if i > CFG.MAX_PRESETS then
+                break
+            end
+            if type(p) == "table" and type(p.name) == "string" and p.name ~= "" then
+                store.presets[#store.presets + 1] = {name = p.name, loadout = readLoadout(p.loadout)}
+            end
+        end
+    end
+    for _, k in ipairs({"auto", "enforce", "closeOnPlay", "stopOnMove", "loop"}) do
+        if type(d[k]) == "boolean" then
+            store[k] = d[k]
+        end
+    end
+    if tonumber(d.speed) then
+        store.speed = math.clamp(tonumber(d.speed), 0.25, 3)
+    end
+    if type(d.keys) == "table" then
+        for k in pairs(DEFAULT_KEYS) do
+            if type(d.keys[k]) == "string" and keyFromName(d.keys[k]) then
+                store.keys[k] = d.keys[k]
+            end
+        end
+    end
+    if type(d.win) == "table" and tonumber(d.win.x) and tonumber(d.win.y) and tonumber(d.win.w) and tonumber(d.win.h) then
+        store.win = {x = d.win.x, y = d.win.y, w = d.win.w, h = d.win.h}
+    end
+    if type(d.tab) == "string" then
+        store.tab = d.tab
+    end
+    store.page = math.clamp(tonumber(d.page) or 1, 1, #store.pages)
+    store.slot = math.clamp(tonumber(d.slot) or 1, 1, CFG.SLOTS)
+end
+
+loadStore()
+
+local function pack(name, i1, i2, walk, run, jump, fall, climb, swim, swimidle)
+    return {
+        name = name,
+        states = {
+            idle = {id = rid(i1), id2 = rid(i2)},
+            walk = {id = rid(walk)},
+            run = {id = rid(run)},
+            jump = {id = rid(jump)},
+            fall = {id = rid(fall)},
+            climb = {id = rid(climb)},
+            swim = {id = rid(swim or 507784897)},
+            swimidle = {id = rid(swimidle or 507785072)},
+        },
+    }
+end
+
+local PACKS = {
+    pack("Default", 507766388, 507766666, 507777826, 507767714, 507765000, 507767968, 507765644),
+    pack("Ninja", 656117400, 656118341, 656121766, 656118852, 656117878, 656115606, 656114359),
+    pack("Zombie", 616158929, 616160636, 616168032, 616163682, 616161997, 616157476, 616156119, 616165109, 616166655),
+    pack("Robot", 616088211, 616089559, 616095330, 616091570, 616090535, 616087089, 616086039, 616092998, 616094091),
+    pack("Levitation", 616006778, 616008087, 616013216, 616010382, 616008936, 616005863, 616003713, 616012453, 616011509),
+    pack("Stylish", 616136790, 616138447, 616146177, 616140816, 616139451, 616134815, 616133594, 616143378, 616144772),
+    pack("Cartoony", 742637544, 742638445, 742640026, 742638842, 742637942, 742637151, 742636889, 742639220, 742639812),
+    pack("Superhero", 616111295, 616113536, 616122287, 616117076, 616115533, 616108001, 616104706, 616119360, 616120861),
+    pack("Knight", 657595757, 657568135, 657552124, 657564596, 658409194, 657600338, 658360781, 657560551, 657557095),
+    pack("Mage", 707742142, 707855907, 707897309, 707861613, 707853694, 707829716, 707826056, 707876443, 707894699),
+    pack("Pirate", 750781874, 750782770, 750785693, 750783738, 750782230, 750780242, 750779899, 750784579, 750785176),
+    pack("Elder", 845397899, 845400520, 845403856, 845386501, 845398858, 845396048, 845392038, 845401742, 845403127),
+    pack("Toy", 782841498, 782845736, 782843345, 782842708, 782847020, 782846423, 782843869, 782844582, 782845186),
+    pack("Vampire", 1083445855, 1083450166, 1083473930, 1083462077, 1083455352, 1083443587, 1083439238),
+    pack("Werewolf", 1083195517, 1083214717, 1083178339, 1083216690, 1083218792, 1083189019, 1083182000, 1083222527, 1083225406),
+    pack("Bubbly", 910004836, 910009958, 910034870, 910025107, 910016857, 910001910, 909997997, 910028158, 910030921),
+    pack("Astronaut", 891621366, 891633237, 891667138, 891636393, 891627522, 891617961, 891609353, 891639666, 891663592),
+}
+
+local DEFAULT_STATES = PACKS[1].states
+
+local PACK_ITEMS = {}
+for _, p in ipairs(PACKS) do
+    PACK_ITEMS[#PACK_ITEMS + 1] = {id = numOf(p.states.idle.id), name = p.name, states = p.states, pack = true}
+end
+
+local BUILTIN = {
+    {id = "507770239", name = "Wave", direct = true},
+    {id = "507770453", name = "Point", direct = true},
+    {id = "507770677", name = "Cheer", direct = true},
+    {id = "507770818", name = "Laugh", direct = true},
+    {id = "507771019", name = "Dance 1", direct = true},
+    {id = "507776043", name = "Dance 2", direct = true},
+    {id = "507777268", name = "Dance 3", direct = true},
+}
+
+local say
+local refreshInventory
+local refreshWheel
+local refreshKeys
+local refreshToggles
+local setTab
+local setVisible
+local buildModel
+local setCaption
+
+local requestFn = (syn and syn.request) or request or http_request or (http and http.request)
+
+local function httpGet(url)
+    if requestFn then
+        local ok, res = pcall(requestFn, {Url = url, Method = "GET"})
+        if ok and res and res.Body and (res.StatusCode == nil or res.StatusCode == 200) then
+            return res.Body
+        end
+    end
+    local ok, body = pcall(function()
+        return game:HttpGet(url)
+    end)
+    if ok then
+        return body
+    end
+end
+
+local function apiJson(sub, path)
+    for _, dom in ipairs({"roblox.com", "roproxy.com"}) do
+        local body = httpGet("https://" .. sub .. "." .. dom .. path)
+        if body then
+            local ok, d = pcall(function()
+                return HttpService:JSONDecode(body)
+            end)
+            if ok and type(d) == "table" and d.errors == nil then
+                return d
+            end
+        end
+    end
+end
+
+local function catalogJson(path)
+    return apiJson("catalog", path)
+end
+
+local animCache = {}
+
+local function getAnims(assetId)
+    assetId = idStr(assetId)
+    if animCache[assetId] then
+        return animCache[assetId]
+    end
+    local ok, objs = pcall(function()
+        return game:GetObjects("rbxassetid://" .. assetId)
+    end)
+    if not ok or type(objs) ~= "table" then
+        return nil
+    end
+    local found = {}
+    for _, o in ipairs(objs) do
+        if o:IsA("Animation") then
+            found[#found + 1] = {name = o.Name, id = o.AnimationId}
+        end
+        for _, d in ipairs(o:GetDescendants()) do
+            if d:IsA("Animation") then
+                found[#found + 1] = {name = d.Name, id = d.AnimationId}
+            end
+        end
+        pcall(function()
+            o:Destroy()
+        end)
+    end
+    if #found == 0 then
+        return nil
+    end
+    table.sort(found, function(a, b)
+        return a.name < b.name
+    end)
+    local ids = {}
+    for _, f in ipairs(found) do
+        ids[#ids + 1] = f.id
+    end
+    animCache[assetId] = ids
+    return ids
+end
+
+local function resolveEmote(e)
+    if e.direct then
+        return rid(e.id)
+    end
+    local ids = getAnims(e.id)
+    return ids and ids[1] or rid(e.id)
+end
+
+-- Picks the state keyword that appears LAST in the item name,
+-- so "Catwalk Glam Jump" is not mistaken for "walk".
+local STATE_WORDS = {"idle", "walk", "run", "jump", "fall", "climb"}
+
+local function classify(name)
+    local n = name:lower()
+    if n:find("swim", 1, true) then
+        return n:find("idle", 1, true) and "swimidle" or "swim"
+    end
+    local best, bestPos
+    for _, k in ipairs(STATE_WORDS) do
+        local from, pos = 1, nil
+        while true do
+            local s = n:find(k, from, true)
+            if not s then
+                break
+            end
+            pos = s
+            from = s + 1
+        end
+        if pos and (not bestPos or pos > bestPos) then
+            best, bestPos = k, pos
+        end
+    end
+    return best
+end
+
+local function retry(n, fn)
+    for i = 1, n do
+        local ok, r = pcall(fn)
+        if ok and r then
+            return r
+        end
+        task.wait(0.4 * i)
+    end
+end
+
+local bundleCache = {}
+
+local function resolveBundle(item)
+    if bundleCache[item.id] then
+        return bundleCache[item.id]
+    end
+    local d = retry(3, function()
+        return catalogJson("/v1/bundles/" .. item.id .. "/details")
+    end)
+    if not d then
+        return nil, "HTTP failed (rate limit / blocked). Wait a few seconds, then click the bundle again."
+    end
+    if type(d.items) ~= "table" then
+        return nil, "Bundle response has no item list."
+    end
+    local found, names = {}, {}
+    for _, it in ipairs(d.items) do
+        if it.type == "Asset" then
+            local nm = tostring(it.name or "")
+            names[#names + 1] = nm
+            local st = classify(nm)
+            if st and not found[st] then
+                found[st] = idStr(it.id)
+            end
+        end
+    end
+    if not next(found) then
+        return nil, "Unrecognized item names: " .. table.concat(names, ", ")
+    end
+    local out, pending = {}, 0
+    for st, aid in pairs(found) do
+        pending += 1
+        task.spawn(function()
+            local ids = retry(3, function()
+                return getAnims(aid)
+            end)
+            if ids and ids[1] then
+                out[st] = {id = ids[1], id2 = st == "idle" and (ids[2] or ids[1]) or nil}
+            end
+            pending -= 1
+        end)
+    end
+    local t0 = os.clock()
+    while pending > 0 and os.clock() - t0 < 20 do
+        task.wait(0.05)
+    end
+    if not next(out) then
+        return nil, "GetObjects failed for every item. Try again, or your executor does not support it."
+    end
+    bundleCache[item.id] = out
+    return out
+end
+
+local playing = {}
+
+local function stopEmote()
+    if playing.conn then
+        playing.conn:Disconnect()
+        playing.conn = nil
+    end
+    local t = playing.track
+    playing.track = nil
+    if t then
+        pcall(function()
+            t:Stop(0.2)
+        end)
+    end
+end
+
+local function playEmote(entry)
+    local char = LP.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then
+        say("Your character is not ready", C.red)
+        return
+    end
+    task.spawn(function()
+        local animId = resolveEmote(entry)
+        stopEmote()
+        local animator = hum:FindFirstChildOfClass("Animator") or new("Animator", {Parent = hum})
+        local a = new("Animation", {AnimationId = animId})
+        local ok, tr = pcall(function()
+            return animator:LoadAnimation(a)
+        end)
+        if not ok or not tr then
+            say("Failed to load " .. entry.name, C.red)
+            return
+        end
+        tr.Priority = Enum.AnimationPriority.Action
+        tr:Play(0.2)
+        playing.track = tr
+        if store.stopOnMove then
+            playing.conn = RunService.Heartbeat:Connect(function()
+                if hum.MoveDirection.Magnitude > 0.1 then
+                    stopEmote()
+                end
+            end)
+        end
+        tr.Stopped:Connect(function()
+            if playing.track == tr then
+                stopEmote()
+            end
+        end)
+        say("Playing " .. entry.name, C.green)
+    end)
+end
+
+local function writeState(animate, def, entry)
+    local folder = animate:FindFirstChild(def.folder)
+    if not folder then
+        return
+    end
+    for i, childName in ipairs(def.children) do
+        local v = folder:FindFirstChild(childName)
+        if v and v:IsA("Animation") then
+            v.AnimationId = (i == 2 and entry.id2) or entry.id
+        end
+    end
+end
+
+local function needsReapply(animate)
+    for key, entry in pairs(store.loadout) do
+        local def = STATE_BY_KEY[key]
+        local folder = def and animate:FindFirstChild(def.folder)
+        local v = folder and folder:FindFirstChild(def.children[1])
+        if v and v:IsA("Animation") and numOf(v.AnimationId) ~= numOf(entry.id) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Snapshot of the character's original animations (taken before any loadout is written).
+-- Kept in genv so it survives a re-execute as long as the character is the same.
+local origSnap = nil
+
+local function origEntry(key)
+    if origSnap and origSnap.char == LP.Character then
+        return origSnap.entries[key]
+    end
+    return nil
+end
+
+local function captureOriginal(char)
+    local animate = char and char:FindFirstChild("Animate")
+    if not animate then
+        return
+    end
+    local cached = genv.__EmoteStudioOrig
+    if cached and cached.char == char then
+        origSnap = cached
+        return
+    end
+    local entries = {}
+    for _, def in ipairs(STATES) do
+        local folder = animate:FindFirstChild(def.folder)
+        if folder then
+            local e = {}
+            for i, childName in ipairs(def.children) do
+                local v = folder:FindFirstChild(childName)
+                if v and v:IsA("Animation") then
+                    if i == 1 then
+                        e.id = v.AnimationId
+                    else
+                        e.id2 = v.AnimationId
+                    end
+                end
+            end
+            if e.id then
+                entries[def.key] = e
+            end
+        end
+    end
+    origSnap = {char = char, entries = entries}
+    genv.__EmoteStudioOrig = origSnap
+end
+
+local function doApply(char, tbl)
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local animate = char:FindFirstChild("Animate")
+    if not hum or not animate or hum.RigType ~= Enum.HumanoidRigType.R15 then
+        return
+    end
+    animate.Disabled = true
+    local animator = hum:FindFirstChildOfClass("Animator")
+    if animator then
+        for _, t in ipairs(animator:GetPlayingAnimationTracks()) do
+            t:Stop(0)
+        end
+    end
+    for _, def in ipairs(STATES) do
+        local entry = tbl[def.key]
+        if entry then
+            writeState(animate, def, entry)
+        end
+    end
+    RunService.Heartbeat:Wait()
+    animate.Disabled = false
+end
+
+local applying, again, pendingTbl = false, false, nil
+
+local function applyLoadout(override)
+    pendingTbl = override or store.loadout
+    if applying then
+        again = true
+        return
+    end
+    applying = true
+    task.spawn(function()
+        repeat
+            again = false
+            local char = LP.Character
+            if char then
+                pcall(doApply, char, pendingTbl)
+            end
+        until not again
+        applying = false
+    end)
+end
+
+local gui = new("ScreenGui", {
+    Name = "EmoteStudio",
+    ResetOnSpawn = false,
+    IgnoreGuiInset = true,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    DisplayOrder = 999,
+})
+pcall(function()
+    if syn and syn.protect_gui then
+        syn.protect_gui(gui)
+    end
+end)
+gui.Parent = guiParent()
+
+local main = new("Frame", {Name = "Main", BackgroundColor3 = C.bg, BorderSizePixel = 0, Active = true, Parent = gui})
+corner(main, 8)
+stroke(main, C.gold, 1.2, 0.35)
+
+local win = {x = 0, y = 0, w = CFG.DEF_W, h = CFG.DEF_H}
+local topHint
+
+local function minSize()
+    local v = vsize()
+    return math.min(CFG.MIN_W, v.X - 10), math.min(CFG.MIN_H, v.Y - 10)
+end
+
+local function applyWin()
+    local v = vsize()
+    local mw, mh = minSize()
+    win.w = math.clamp(win.w, mw, v.X)
+    win.h = math.clamp(win.h, mh, v.Y)
+    win.x = math.clamp(win.x, -win.w + 80, v.X - 80)
+    win.y = math.clamp(win.y, 0, v.Y - 40)
+    main.Position = UDim2.fromOffset(win.x, win.y)
+    main.Size = UDim2.fromOffset(win.w, win.h)
+    if topHint then
+        topHint.Visible = win.w >= 780
+    end
+end
+
+local function resetWin()
+    local v = vsize()
+    win.w = math.min(CFG.DEF_W, v.X - 20)
+    win.h = math.min(CFG.DEF_H, v.Y - 20)
+    win.x = (v.X - win.w) / 2
+    win.y = (v.Y - win.h) / 2
+    applyWin()
+end
+
+local function persistWin()
+    store.win = {x = win.x, y = win.y, w = win.w, h = win.h}
+    save()
+end
+
+local dragState = nil
+local pvDrag = false
+
+local top = new("Frame", {Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = C.panel, BorderSizePixel = 0, Parent = main})
+corner(top, 8)
+new("Frame", {Position = UDim2.new(0, 0, 1, -8), Size = UDim2.new(1, 0, 0, 8), BackgroundColor3 = C.panel, BorderSizePixel = 0, Parent = top})
+
+label({Position = UDim2.new(0, 12, 0, 0), Size = UDim2.new(0, 116, 1, 0), Text = "Emote Studio", Font = CFG.TITLE_FONT, TextSize = 24, TextColor3 = C.cream, Parent = top})
+
+top.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragState = {mode = "move", start = input.Position, x = win.x, y = win.y, w = win.w, h = win.h}
+    end
+end)
+
+local tabsFrame = new("Frame", {Position = UDim2.new(0, 132, 0, 5), Size = UDim2.new(0, 300, 0, 24), BackgroundTransparency = 1, Parent = top})
+new("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = tabsFrame})
+
+local rightBar = new("Frame", {AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 5), Size = UDim2.new(0, 290, 0, 24), BackgroundTransparency = 1, Parent = top})
+new("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, HorizontalAlignment = Enum.HorizontalAlignment.Right, VerticalAlignment = Enum.VerticalAlignment.Center, Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder, Parent = rightBar})
+
+topHint = label({Size = UDim2.fromOffset(176, 24), TextSize = 11, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Right, LayoutOrder = 1, Parent = rightBar})
+local unloadBtn = button({Text = "Unload", Size = UDim2.fromOffset(56, 24), LayoutOrder = 2, Parent = rightBar})
+local hideBtn = button({Text = "Hide", Size = UDim2.fromOffset(46, 24), LayoutOrder = 3, Parent = rightBar})
+
+if store.win then
+    win.x, win.y, win.w, win.h = store.win.x, store.win.y, store.win.w, store.win.h
+    applyWin()
+else
+    resetWin()
+end
+
+local function makeHandle(props, edges)
+    local h = new("Frame", with({BackgroundColor3 = C.gold, BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 50, Active = true}, props))
+    h.Parent = main
+    h.MouseEnter:Connect(function()
+        if not dragState then
+            h.BackgroundTransparency = 0.55
+        end
+    end)
+    h.MouseLeave:Connect(function()
+        if not (dragState and dragState.handle == h) then
+            h.BackgroundTransparency = 1
+        end
+    end)
+    h.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragState = {mode = "resize", edges = edges, start = input.Position, x = win.x, y = win.y, w = win.w, h = win.h, handle = h}
+        end
+    end)
+end
+
+makeHandle({Position = UDim2.new(1, -3, 0, 12), Size = UDim2.new(0, 6, 1, -24)}, {r = true})
+makeHandle({Position = UDim2.new(0, -3, 0, 12), Size = UDim2.new(0, 6, 1, -24)}, {l = true})
+makeHandle({Position = UDim2.new(0, 12, 1, -3), Size = UDim2.new(1, -24, 0, 6)}, {b = true})
+makeHandle({Position = UDim2.new(0, 12, 0, -3), Size = UDim2.new(1, -24, 0, 6)}, {t = true})
+makeHandle({Position = UDim2.new(0, -3, 0, -3), Size = UDim2.fromOffset(12, 12)}, {l = true, t = true})
+makeHandle({Position = UDim2.new(1, -9, 0, -3), Size = UDim2.fromOffset(12, 12)}, {r = true, t = true})
+makeHandle({Position = UDim2.new(0, -3, 1, -9), Size = UDim2.fromOffset(12, 12)}, {l = true, b = true})
+makeHandle({Position = UDim2.new(1, -9, 1, -9), Size = UDim2.fromOffset(12, 12)}, {r = true, b = true})
+
+local body = new("Frame", {Position = UDim2.new(0, 8, 0, 42), Size = UDim2.new(1, -16, 1, -50), BackgroundTransparency = 1, Parent = main})
+local colL = new("Frame", {Size = UDim2.new(0, CFG.LEFT_W, 1, 0), BackgroundTransparency = 1, Parent = body})
+local colR = new("Frame", {Position = UDim2.new(0, CFG.LEFT_W + 8, 0, 0), Size = UDim2.new(1, -(CFG.LEFT_W + 8), 1, 0), BackgroundTransparency = 1, Parent = body})
+local content = new("Frame", {Size = UDim2.new(1, 0, 1, -38), BackgroundTransparency = 1, Parent = colR})
+
+local statusBox = new("Frame", {Position = UDim2.new(0, 0, 1, -34), Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = C.panel, BorderSizePixel = 0, Parent = colR})
+corner(statusBox, 8)
+stroke(statusBox, C.gold, 1.2, 0.35)
+local statusLbl = label({Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -20, 1, 0), TextSize = 12, TextColor3 = C.cream, TextWrapped = true, Parent = statusBox})
+
+say = function(msg, col)
+    statusLbl.Text = tostring(msg)
+    statusLbl.TextColor3 = col or C.cream
+end
+
+local pvBox = new("Frame", {Size = UDim2.new(1, 0, 1, -122), BackgroundColor3 = C.panel, BorderSizePixel = 0, Parent = colL})
+corner(pvBox, 8)
+stroke(pvBox, C.gold, 1.2, 0.35)
+
+local vp = new("ViewportFrame", {
+    Size = UDim2.new(1, -4, 1, -28),
+    Position = UDim2.fromOffset(2, 2),
+    BackgroundColor3 = Color3.fromRGB(26, 34, 30),
+    BorderSizePixel = 0,
+    Ambient = Color3.fromRGB(170, 170, 170),
+    LightColor = Color3.fromRGB(255, 244, 220),
+    LightDirection = Vector3.new(-1, -1, -1),
+    Active = true,
+    Parent = pvBox,
+})
+corner(vp, 7)
+local world = new("WorldModel", {Parent = vp})
+local cam = new("Camera", {FieldOfView = 50, Parent = vp})
+vp.CurrentCamera = cam
+
+local captionLbl = label({Position = UDim2.new(0, 6, 1, -24), Size = UDim2.new(1, -12, 0, 22), Text = "Preview", TextSize = 11, TextXAlignment = Enum.TextXAlignment.Center, TextTruncate = Enum.TextTruncate.AtEnd, Parent = pvBox})
+
+setCaption = function(t)
+    captionLbl.Text = tostring(t)
+end
+
+local pv = {model = nil, animator = nil, track = nil, speed = store.speed, loop = store.loop, last = nil, center = Vector3.zero, yaw = 0, pitch = -0.1, dist = 9, baseDist = 9}
+
+local function updateCamera()
+    cam.CFrame = CFrame.new(pv.center) * CFrame.Angles(0, pv.yaw, 0) * CFrame.Angles(pv.pitch, 0, 0) * CFrame.new(0, 0, pv.dist)
+end
+
+local function stopPreview()
+    local t = pv.track
+    pv.track = nil
+    if t then
+        pcall(function()
+            t:Stop(0.1)
+            t:Destroy()
+        end)
+    end
+end
+
+local playPreview
+
+local function playBase()
+    local e = store.loadout.idle
+    local orig = origEntry("idle")
+    local id
+    if e then
+        setCaption(e.name .. " \u{2022} Idle")
+        id = e.id
+    elseif orig then
+        setCaption("Original \u{2022} Idle")
+        id = orig.id
+    else
+        setCaption("Default \u{2022} Idle")
+        id = CFG.IDLE
+    end
+    playPreview(id, true, true)
+end
+
+playPreview = function(animId, looped, isBase)
+    if not pv.animator then
+        return nil
+    end
+    stopPreview()
+    local a = new("Animation", {AnimationId = animId})
+    local ok, tr = pcall(function()
+        return pv.animator:LoadAnimation(a)
+    end)
+    if not ok or not tr then
+        return nil
+    end
+    if looped == nil then
+        looped = pv.loop
+    end
+    if not isBase then
+        pv.last = {id = animId, looped = looped}
+    end
+    tr.Priority = Enum.AnimationPriority.Action4
+    tr.Looped = looped
+    tr:Play(0.1, 1, pv.speed)
+    pv.track = tr
+    tr.Stopped:Connect(function()
+        if pv.track == tr and alive then
+            playBase()
+        end
+    end)
+    return tr
+end
+
+buildModel = function()
+    stopPreview()
+    if pv.model then
+        pv.model:Destroy()
+        pv.model = nil
+    end
+    pv.animator = nil
+    local char = LP.Character
+    if not char then
+        say("Waiting for your character...")
+        return
+    end
+    local prev = char.Archivable
+    char.Archivable = true
+    local ok, clone = pcall(function()
+        return char:Clone()
+    end)
+    char.Archivable = prev
+    if not ok or not clone then
+        say("Could not clone your character", C.red)
+        return
+    end
+    local hum = clone:FindFirstChildOfClass("Humanoid")
+    local root = clone:FindFirstChild("HumanoidRootPart")
+    if not hum or not root then
+        clone:Destroy()
+        say("Character has no Humanoid", C.red)
+        return
+    end
+    for _, d in ipairs(clone:GetDescendants()) do
+        if d:IsA("LuaSourceContainer") or d:IsA("Sound") or d:IsA("BillboardGui") or d:IsA("ForceField") then
+            d:Destroy()
+        elseif d:IsA("BasePart") then
+            d.Anchored = false
+        end
+    end
+    root.Anchored = true
+    hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+    clone:PivotTo(CFrame.new(0, 0, 0) * CFrame.Angles(0, math.pi, 0))
+    clone.Parent = world
+    pv.model = clone
+    pv.animator = hum:FindFirstChildOfClass("Animator") or new("Animator", {Parent = hum})
+    local cf, size = clone:GetBoundingBox()
+    pv.center = cf.Position
+    pv.baseDist = math.max(size.Y * 1.6, 6)
+    pv.dist = pv.baseDist
+    pv.yaw = 0
+    pv.pitch = -0.1
+    updateCamera()
+    playBase()
+end
+
+vp.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        pvDrag = true
+    end
+end)
+
+vp.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseWheel then
+        pv.dist = math.clamp(pv.dist * (1 - input.Position.Z * 0.1), pv.baseDist * 0.35, pv.baseDist * 2.2)
+        updateCamera()
+    end
+end)
+
+-- Preview control panel. Wrapped in do...end so its many locals are freed
+-- (Lua allows at most 200 active locals per function).
+local wheelBtn
+local setSpeed, refreshLoopBtn
+do
+    local controls = new("Frame", {Position = UDim2.new(0, 0, 1, -116), Size = UDim2.new(1, 0, 0, 116), BackgroundColor3 = C.panel, BorderSizePixel = 0, Parent = colL})
+    corner(controls, 8)
+    stroke(controls, C.gold, 1.2, 0.35)
+
+    local row1 = new("Frame", {Position = UDim2.fromOffset(8, 8), Size = UDim2.new(1, -16, 0, 24), BackgroundTransparency = 1, Parent = controls})
+    label({Size = UDim2.fromOffset(40, 24), Text = "Speed", Parent = row1})
+    local speedMinus = button({Text = "-", Position = UDim2.fromOffset(42, 0), Size = UDim2.fromOffset(24, 24), Parent = row1})
+    local speedLbl = label({Position = UDim2.fromOffset(68, 0), Size = UDim2.fromOffset(44, 24), Text = "1.00x", TextXAlignment = Enum.TextXAlignment.Center, Parent = row1})
+    local speedPlus = button({Text = "+", Position = UDim2.fromOffset(114, 0), Size = UDim2.fromOffset(24, 24), Parent = row1})
+    local stopBtn = button({Text = "Stop", Position = UDim2.fromOffset(144, 0), Size = UDim2.new(1, -144, 1, 0), Parent = row1})
+
+    local row2 = new("Frame", {Position = UDim2.fromOffset(8, 38), Size = UDim2.new(1, -16, 0, 26), BackgroundTransparency = 1, Parent = controls})
+    local loopBtn = button({Text = "Loop: ON", Size = UDim2.new(0.5, -2, 1, 0), Parent = row2})
+    local refreshBtn = button({Text = "Refresh Model", Position = UDim2.new(0.5, 2, 0, 0), Size = UDim2.new(0.5, -2, 1, 0), Parent = row2})
+
+    local row3 = new("Frame", {Position = UDim2.fromOffset(8, 68), Size = UDim2.new(1, -16, 0, 26), BackgroundTransparency = 1, Parent = controls})
+    local camBtn = button({Text = "Reset Camera", Size = UDim2.new(0.5, -2, 1, 0), Parent = row3})
+    wheelBtn = button({Text = "Open Wheel (B)", Position = UDim2.new(0.5, 2, 0, 0), Size = UDim2.new(0.5, -2, 1, 0), Parent = row3})
+
+    label({Position = UDim2.fromOffset(0, 98), Size = UDim2.new(1, 0, 0, 14), Text = "Drag = rotate  |  Scroll = zoom", TextSize = 10, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Center, Parent = controls})
+
+    setSpeed = function(v)
+        pv.speed = math.clamp(v, 0.25, 3)
+        store.speed = pv.speed
+        speedLbl.Text = string.format("%.2fx", pv.speed)
+        if pv.track then
+            pcall(function()
+                pv.track:AdjustSpeed(pv.speed)
+            end)
+        end
+        save()
+    end
+
+    refreshLoopBtn = function()
+        loopBtn.Text = "Loop: " .. (pv.loop and "ON" or "OFF")
+        setActive(loopBtn, pv.loop)
+    end
+
+    speedMinus.MouseButton1Click:Connect(function()
+        setSpeed(pv.speed - 0.25)
+    end)
+    speedPlus.MouseButton1Click:Connect(function()
+        setSpeed(pv.speed + 0.25)
+    end)
+    stopBtn.MouseButton1Click:Connect(function()
+        stopEmote()
+        playBase()
+        say("Stopped")
+    end)
+    loopBtn.MouseButton1Click:Connect(function()
+        pv.loop = not pv.loop
+        store.loop = pv.loop
+        refreshLoopBtn()
+        if pv.track and pv.track.IsPlaying then
+            pv.track.Looped = pv.loop
+        end
+        save()
+    end)
+    camBtn.MouseButton1Click:Connect(function()
+        pv.yaw = 0
+        pv.pitch = -0.1
+        pv.dist = pv.baseDist
+        updateCamera()
+    end)
+    refreshBtn.MouseButton1Click:Connect(function()
+        buildModel()
+        say("Preview model refreshed")
+    end)
+end
+
+bind(UserInputService.InputChanged, function(input)
+    local t = input.UserInputType
+    if t ~= Enum.UserInputType.MouseMovement and t ~= Enum.UserInputType.Touch then
+        return
+    end
+    if dragState then
+        local d = input.Position - dragState.start
+        local s = dragState
+        if s.mode == "move" then
+            win.x = s.x + d.X
+            win.y = s.y + d.Y
+            applyWin()
+        else
+            local e = s.edges
+            local mw, mh = minSize()
+            local nx, ny, nw, nh = s.x, s.y, s.w, s.h
+            if e.r then
+                nw = math.max(mw, s.w + d.X)
+            end
+            if e.b then
+                nh = math.max(mh, s.h + d.Y)
+            end
+            if e.l then
+                nw = math.max(mw, s.w - d.X)
+                nx = s.x + (s.w - nw)
+            end
+            if e.t then
+                nh = math.max(mh, s.h - d.Y)
+                ny = s.y + (s.h - nh)
+            end
+            win.x, win.y, win.w, win.h = nx, ny, nw, nh
+            applyWin()
+        end
+    elseif pvDrag and pv.model then
+        pv.yaw = pv.yaw - input.Delta.X * 0.012
+        pv.pitch = math.clamp(pv.pitch - input.Delta.Y * 0.008, -1.2, 1.2)
+        updateCamera()
+    end
+end)
+
+bind(UserInputService.InputEnded, function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        if dragState then
+            local s = dragState
+            dragState = nil
+            if s.handle then
+                s.handle.BackgroundTransparency = 1
+            end
+            if win.x ~= s.x or win.y ~= s.y or win.w ~= s.w or win.h ~= s.h then
+                persistWin()
+            end
+        end
+        pvDrag = false
+    end
+end)
+
+local pages = {}
+local tabButtons = {}
+local TAB_NAMES = {"Emotes", "Animations", "Inventory", "Settings"}
+local TAB_W = {Emotes = 64, Animations = 84, Inventory = 72, Settings = 68}
+local KIND_BY_TAB = {Emotes = "emotes", Animations = "anims"}
+
+local function newPage(name, scroll)
+    local p
+    if scroll then
+        p = new("ScrollingFrame", {
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundColor3 = C.panel,
+            BorderSizePixel = 0,
+            ScrollBarThickness = 4,
+            ScrollBarImageColor3 = C.gold,
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            CanvasSize = UDim2.new(),
+            ScrollingDirection = Enum.ScrollingDirection.Y,
+            Visible = false,
+            Parent = content,
+        })
+        corner(p, 8)
+        stroke(p, C.gold, 1.2, 0.35)
+        pad(p, 10, 8, 10, 8)
+        new("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder, Parent = p})
+    else
+        p = new("Frame", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Visible = false, Parent = content})
+    end
+    pages[name] = p
+    return p
+end
+
+for i, name in ipairs(TAB_NAMES) do
+    local b = button({Text = name, Size = UDim2.fromOffset(TAB_W[name], 24), LayoutOrder = i, Parent = tabsFrame})
+    b.MouseButton1Click:Connect(function()
+        setTab(name)
+    end)
+    tabButtons[name] = b
+end
+
+newPage("Emotes", false)
+newPage("Animations", false)
+newPage("Inventory", true)
+newPage("Settings", true)
+
+local SORTS = {{"Relevance", 0}, {"Favorited", 1}, {"Bestselling", 2}, {"Newest", 3}}
+
+local function newSearch()
+    return {items = {}, cursor = nil, keyword = "", source = "catalog", page = 1, loading = false, failed = false, exhausted = false, token = 0, sortIdx = 1, started = false, noSub = false}
+end
+
+local S = {emotes = newSearch(), anims = newSearch()}
+local browseUI = {}
+local glowTweens = {}
+
+local function refreshBrowse(kind)
+    local u = browseUI[kind]
+    if u then
+        u.refresh()
+    end
+end
+
+local function buildPath(sub, st)
+    local p = "/v1/search/items/details?Category=" .. CFG.CATEGORY .. "&Limit=30&SortType=" .. SORTS[st.sortIdx][2]
+    if sub then
+        p = p .. "&Subcategory=" .. sub
+    end
+    if st.keyword ~= "" then
+        p = p .. "&Keyword=" .. HttpService:UrlEncode(st.keyword)
+    end
+    if st.cursor then
+        p = p .. "&cursor=" .. HttpService:UrlEncode(st.cursor)
+    end
+    return p
+end
+
+local function fetchBatch(kind, st)
+    local sub = kind == "emotes" and CFG.EMOTE_SUB or CFG.BUNDLE_SUB
+    if kind == "anims" and st.noSub then
+        sub = nil
+    end
+    local d = catalogJson(buildPath(sub, st))
+    if not d and sub and kind == "anims" then
+        st.noSub = true
+        d = catalogJson(buildPath(nil, st))
+    end
+    return d
+end
+
+local function lookupId(kind, id)
+    if kind == "anims" then
+        local d = catalogJson("/v1/bundles/" .. id .. "/details")
+        if d and d.id then
+            return {id = idStr(d.id), name = tostring(d.name or ("Bundle " .. id)), creator = d.creator and d.creator.name, thumb = thumbUrl(d.id, true)}
+        end
+        return nil
+    end
+    local d = apiJson("economy", "/v2/assets/" .. id .. "/details")
+    if d and d.AssetId then
+        return {id = idStr(d.AssetId), name = tostring(d.Name or id), creator = d.Creator and d.Creator.Name, thumb = thumbUrl(d.AssetId)}
+    end
+    return {id = id, name = "Asset " .. id, thumb = thumbUrl(id)}
+end
+
+local function runSearch(kind, reset)
+    local st = S[kind]
+    if st.source ~= "catalog" then
+        refreshBrowse(kind)
+        return
+    end
+    if reset then
+        st.items = {}
+        st.cursor = nil
+        st.exhausted = false
+        st.page = 1
+    end
+    st.token += 1
+    local tok = st.token
+    st.loading = true
+    st.failed = false
+    refreshBrowse(kind)
+    task.spawn(function()
+        if reset and st.keyword:match("^%d%d%d%d%d+$") then
+            local it = lookupId(kind, st.keyword)
+            if tok ~= st.token then
+                return
+            end
+            if it then
+                st.items = {it}
+                st.exhausted = true
+                st.loading = false
+                refreshBrowse(kind)
+                return
+            end
+        end
+        local need = st.page * CFG.PER_PAGE
+        local tries = 0
+        while #st.items < need and not st.exhausted and tries < 6 do
+            tries += 1
+            local d = fetchBatch(kind, st)
+            if tok ~= st.token then
+                return
+            end
+            if not d or type(d.data) ~= "table" then
+                st.exhausted = true
+                st.failed = #st.items == 0
+                break
+            end
+            for _, it in ipairs(d.data) do
+                local isBundle = it.itemType == "Bundle"
+                if (kind == "anims") == isBundle then
+                    st.items[#st.items + 1] = {
+                        id = idStr(it.id),
+                        name = tostring(it.name or "Unknown"),
+                        creator = it.creatorName,
+                        thumb = thumbUrl(it.id, isBundle),
+                    }
+                end
+            end
+            st.cursor = d.nextPageCursor
+            if not st.cursor then
+                st.exhausted = true
+            end
+        end
+        if tok ~= st.token then
+            return
+        end
+        if st.page > 1 and #st.items <= (st.page - 1) * CFG.PER_PAGE then
+            st.page -= 1
+        end
+        st.loading = false
+        refreshBrowse(kind)
+    end)
+end
+
+local function getList(kind)
+    local st = S[kind]
+    if st.source == "catalog" then
+        return st.items
+    end
+    local src = kind == "emotes" and BUILTIN or PACK_ITEMS
+    local kw = st.keyword:lower()
+    if kw == "" then
+        return src
+    end
+    local out = {}
+    for _, it in ipairs(src) do
+        if it.name:lower():find(kw, 1, true) then
+            out[#out + 1] = it
+        end
+    end
+    return out
+end
+
+local function findFree(p0, s0)
+    local total = #store.pages * CFG.SLOTS
+    for k = 1, total do
+        local idx = ((p0 - 1) * CFG.SLOTS + (s0 - 1) + k) % total
+        local p = math.floor(idx / CFG.SLOTS) + 1
+        local s = idx % CFG.SLOTS + 1
+        if not store.pages[p][s] then
+            return p, s
+        end
+    end
+end
+
+local function addToWheel(item)
+    local entry = {id = idStr(item.id), name = item.name, direct = item.direct == true}
+    local pi, si = store.page, store.slot
+    if store.pages[pi][si] then
+        local fp, fs = findFree(pi, si)
+        if fp then
+            pi, si = fp, fs
+        elseif #store.pages < CFG.MAX_PAGES then
+            store.pages[#store.pages + 1] = {}
+            pi, si = #store.pages, 1
+        end
+    end
+    store.pages[pi][si] = entry
+    store.page, store.slot = pi, si
+    local np, ns = findFree(pi, si)
+    if np then
+        store.page, store.slot = np, ns
+    end
+    save()
+    refreshInventory()
+    say(string.format("Added %s to page %d, slot %d", item.name, pi, si), C.green)
+end
+
+local function afterLoadoutChange(msg)
+    save()
+    refreshInventory()
+    if store.auto then
+        applyLoadout()
+    end
+    say(msg, C.green)
+end
+
+local function fitGrid(grid, layout)
+    local w = grid.AbsoluteSize.X - 12 - 4
+    if w <= 0 then
+        return
+    end
+    local cols = math.max(2, math.floor((w + 6) / 80))
+    local cw = math.floor((w - (cols - 1) * 6) / cols)
+    layout.CellSize = UDim2.fromOffset(cw, cw + 20)
+end
+
+local function buildBrowse(kind, parent)
+    local isEmote = kind == "emotes"
+    local st = S[kind]
+    local ui = {cells = {}, selTok = 0, sel = nil, states = nil, state = nil, stateBtns = {}}
+    browseUI[kind] = ui
+
+    local searchRow = new("Frame", {Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1, Parent = parent})
+    local box = new("TextBox", {
+        Size = UDim2.new(1, -176, 1, 0),
+        BackgroundColor3 = C.panel,
+        BorderSizePixel = 0,
+        TextColor3 = C.cream,
+        PlaceholderText = isEmote and "Search emotes or paste an Asset ID..." or "Search animation bundles or paste a Bundle ID...",
+        PlaceholderColor3 = C.dim,
+        Text = "",
+        ClearTextOnFocus = false,
+        Font = Enum.Font.Gotham,
+        TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ClipsDescendants = true,
+        Parent = searchRow,
+    })
+    corner(box, 6)
+    stroke(box, C.gold, 1, 0.7)
+    pad(box, 10, 0, 10, 0)
+    local goBtn = button({Text = "Search", Position = UDim2.new(1, -170, 0, 0), Size = UDim2.new(0, 64, 1, 0), Parent = searchRow})
+    local sortBtn = button({Text = SORTS[st.sortIdx][1], Position = UDim2.new(1, -100, 0, 0), Size = UDim2.new(0, 100, 1, 0), Parent = searchRow})
+
+    local modeRow = new("Frame", {Position = UDim2.fromOffset(0, 34), Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, Parent = parent})
+    local catBtn = button({Text = isEmote and "Emote Catalog" or "Bundle Catalog", Size = UDim2.fromOffset(122, 26), Parent = modeRow})
+    local biBtn = button({Text = isEmote and "Built-in Emotes" or "Built-in Packs", Position = UDim2.fromOffset(128, 0), Size = UDim2.fromOffset(112, 26), Parent = modeRow})
+
+    -- Glowing yellow Preset button (Animations tab only)
+    local presetBtn
+    if not isEmote then
+        local YELLOW = Color3.fromRGB(240, 196, 60)
+        local YELLOW_HI = Color3.fromRGB(255, 226, 110)
+        presetBtn = new("TextButton", {
+            Text = "Preset",
+            Position = UDim2.fromOffset(246, 0),
+            Size = UDim2.fromOffset(70, 26),
+            BackgroundColor3 = YELLOW,
+            BorderSizePixel = 0,
+            AutoButtonColor = false,
+            Font = Enum.Font.GothamBold,
+            TextSize = 12,
+            TextColor3 = Color3.fromRGB(30, 22, 4),
+            Parent = modeRow,
+        })
+        corner(presetBtn, 5)
+        local glow = stroke(presetBtn, YELLOW_HI, 2, 0.2)
+        local tinfo = TweenInfo.new(0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
+        local t1 = TweenService:Create(glow, tinfo, {Thickness = 3.5, Transparency = 0.7})
+        local t2 = TweenService:Create(presetBtn, tinfo, {BackgroundColor3 = YELLOW_HI})
+        glowTweens[#glowTweens + 1] = t1
+        glowTweens[#glowTweens + 1] = t2
+        t1:Play()
+        t2:Play()
+    end
+
+    local hintX = isEmote and 248 or 322
+    label({Position = UDim2.fromOffset(hintX, 0), Size = UDim2.new(1, -hintX, 1, 0), Text = isEmote and "paste an asset ID to look it up" or "pick per state", TextSize = 10, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Right, TextTruncate = Enum.TextTruncate.AtEnd, Parent = modeRow})
+
+    local grid = new("ScrollingFrame", {
+        Position = UDim2.fromOffset(0, 66),
+        Size = UDim2.new(1, -(CFG.DETAIL_W + 8), 1, -94),
+        BackgroundColor3 = C.panel,
+        BorderSizePixel = 0,
+        ScrollBarThickness = 4,
+        ScrollBarImageColor3 = C.gold,
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        CanvasSize = UDim2.new(),
+        Parent = parent,
+    })
+    corner(grid, 8)
+    stroke(grid, C.gold, 1.2, 0.35)
+    pad(grid, 6, 6, 6, 6)
+    local gridLayout = new("UIGridLayout", {CellSize = UDim2.fromOffset(76, 96), CellPadding = UDim2.fromOffset(6, 6), SortOrder = Enum.SortOrder.LayoutOrder, Parent = grid})
+    grid:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+        fitGrid(grid, gridLayout)
+    end)
+    fitGrid(grid, gridLayout)
+    local msg = label({Size = UDim2.new(1, 0, 0, 40), Text = "", TextXAlignment = Enum.TextXAlignment.Center, TextColor3 = C.dim, Visible = false, Parent = grid})
+
+    local pager = new("Frame", {Position = UDim2.new(0, 0, 1, -24), Size = UDim2.new(1, -(CFG.DETAIL_W + 8), 0, 24), BackgroundTransparency = 1, Parent = parent})
+    local prevBtn = button({Text = "<", Size = UDim2.fromOffset(36, 24), Parent = pager})
+    local nextBtn = button({Text = ">", AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.fromOffset(36, 24), Parent = pager})
+    local pageLbl = label({Position = UDim2.fromOffset(40, 0), Size = UDim2.new(1, -80, 1, 0), Text = "Page 1", TextSize = 11, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Center, Parent = pager})
+
+    local detail = new("Frame", {AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 66), Size = UDim2.new(0, CFG.DETAIL_W, 1, -66), BackgroundColor3 = C.panel, BorderSizePixel = 0, Parent = parent})
+    corner(detail, 8)
+    stroke(detail, C.gold, 1.2, 0.35)
+    local nameLbl = label({Position = UDim2.fromOffset(8, 8), Size = UDim2.new(1, -16, 0, 46), Text = "Select an item", Font = CFG.TITLE_FONT, TextSize = 22, TextColor3 = C.cream, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Center, TextYAlignment = Enum.TextYAlignment.Top, Parent = detail})
+    local info = label({Position = UDim2.fromOffset(8, 56), Size = UDim2.new(1, -16, 0, 16), TextSize = 11, TextColor3 = C.gold, TextXAlignment = Enum.TextXAlignment.Center, TextTruncate = Enum.TextTruncate.AtEnd, Parent = detail})
+    local byLbl = label({Position = UDim2.fromOffset(8, 74), Size = UDim2.new(1, -16, 0, 14), TextSize = 11, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Center, TextTruncate = Enum.TextTruncate.AtEnd, Parent = detail})
+
+    local stateRow
+    if not isEmote then
+        stateRow = new("Frame", {Position = UDim2.new(0, 8, 1, -148), Size = UDim2.new(1, -16, 0, 48), BackgroundTransparency = 1, Parent = detail})
+        new("UIGridLayout", {CellSize = UDim2.new(0.25, -3, 0, 22), CellPadding = UDim2.fromOffset(4, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = stateRow})
+    end
+
+    local actions = new("Frame", {Position = UDim2.new(0, 8, 1, -94), Size = UDim2.new(1, -16, 0, 86), BackgroundTransparency = 1, Parent = detail})
+    new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = actions})
+
+    local addBtn, playBtn, copyBtn, addStateBtn
+    if isEmote then
+        addBtn = button({Text = "+ Add to Wheel", Size = UDim2.new(1, 0, 0, 26), LayoutOrder = 1, Parent = actions})
+        playBtn = button({Text = "Play on me", Size = UDim2.new(1, 0, 0, 26), LayoutOrder = 2, Parent = actions})
+        copyBtn = button({Text = "Copy ID", Size = UDim2.new(1, 0, 0, 26), LayoutOrder = 3, Parent = actions})
+    else
+        addBtn = button({Text = "+ Add whole bundle", Size = UDim2.new(1, 0, 0, 26), LayoutOrder = 1, Parent = actions})
+        addStateBtn = button({Text = "+ Add state only", Size = UDim2.new(1, 0, 0, 26), LayoutOrder = 2, Parent = actions})
+        copyBtn = button({Text = "Copy Bundle ID", Size = UDim2.new(1, 0, 0, 26), LayoutOrder = 3, Parent = actions})
+    end
+    setActive(addBtn, true)
+
+    ui.refreshAdd = function()
+        if isEmote then
+            addBtn.Text = string.format("+ Add to Wheel (P%d S%d)", store.page, store.slot)
+        end
+    end
+    ui.refreshAdd()
+
+    local function setInfo(extra)
+        local item = ui.sel
+        if not item then
+            info.Text = ""
+            return
+        end
+        local base
+        if item.pack then
+            base = "Built-in pack"
+        elseif item.direct then
+            base = "ID " .. item.id
+        else
+            base = (isEmote and "ID " or "Bundle ") .. item.id
+        end
+        info.Text = extra and (base .. "  \u{2022}  " .. extra) or base
+    end
+
+    local function highlight()
+        for it, c in pairs(ui.cells) do
+            c.stroke.Color = it == ui.sel and C.cream or C.gold
+            c.stroke.Transparency = it == ui.sel and 0 or 0.8
+        end
+    end
+
+    local function refreshStates()
+        if isEmote then
+            return
+        end
+        for _, def in ipairs(STATES) do
+            local b = ui.stateBtns[def.key]
+            local avail = ui.states and ui.states[def.key]
+            b.TextTransparency = avail and 0 or 0.55
+            setActive(b, avail and ui.state == def.key)
+        end
+        local def = ui.state and STATE_BY_KEY[ui.state]
+        addStateBtn.Text = "+ Add " .. (def and def.label or "state") .. " only"
+    end
+
+    local function trackLength(tr, token, cb)
+        task.spawn(function()
+            local t0 = os.clock()
+            while tr.Length == 0 and os.clock() - t0 < 4 and ui.selTok == token do
+                task.wait(0.1)
+            end
+            if ui.selTok == token and tr.Length > 0 then
+                cb(tr.Length)
+            end
+        end)
+    end
+
+    local function previewState(key, token)
+        local def = STATE_BY_KEY[key]
+        local tr = playPreview(ui.states[key].id, true)
+        setCaption(ui.sel.name .. " \u{2022} " .. def.label)
+        if tr then
+            trackLength(tr, token, function(len)
+                setInfo(string.format("%s %.2fs", def.label, len))
+            end)
+        end
+    end
+
+    if not isEmote then
+        for i, def in ipairs(STATES) do
+            local b = button({Text = def.label, TextSize = 10, LayoutOrder = i, Parent = stateRow})
+            ui.stateBtns[def.key] = b
+            b.MouseButton1Click:Connect(function()
+                if not ui.states or not ui.states[def.key] then
+                    say("This bundle has no " .. def.label .. " state", C.red)
+                    return
+                end
+                ui.state = def.key
+                refreshStates()
+                previewState(def.key, ui.selTok)
+                say("Previewing " .. def.label)
+            end)
+        end
+        refreshStates()
+    end
+
+    ui.select = function(item)
+        ui.sel = item
+        highlight()
+        nameLbl.Text = item.name
+        byLbl.Text = item.creator and ("by " .. item.creator) or ""
+        setInfo()
+        ui.selTok += 1
+        local token = ui.selTok
+        if isEmote then
+            task.spawn(function()
+                say("Loading preview...")
+                local animId = resolveEmote(item)
+                if ui.selTok ~= token then
+                    return
+                end
+                local tr = playPreview(animId)
+                if not tr then
+                    say("Could not load this animation", C.red)
+                    return
+                end
+                setCaption(item.name)
+                say("Previewing " .. item.name)
+                trackLength(tr, token, function(len)
+                    setInfo(string.format("%.2fs", len))
+                end)
+            end)
+        else
+            ui.states = nil
+            ui.state = nil
+            refreshStates()
+            task.spawn(function()
+                local states, err = item.states, nil
+                if not states then
+                    say("Resolving bundle...")
+                    states, err = resolveBundle(item)
+                end
+                if ui.selTok ~= token then
+                    return
+                end
+                if not states or not next(states) then
+                    say(err or "Could not resolve this bundle.", C.red)
+                    return
+                end
+                ui.states = states
+                for _, def in ipairs(STATES) do
+                    if states[def.key] then
+                        ui.state = def.key
+                        break
+                    end
+                end
+                refreshStates()
+                if ui.state then
+                    previewState(ui.state, token)
+                    say("Previewing " .. item.name)
+                end
+            end)
+        end
+    end
+
+    ui.refresh = function()
+        for _, c in ipairs(grid:GetChildren()) do
+            if c:IsA("GuiButton") then
+                c:Destroy()
+            end
+        end
+        ui.cells = {}
+        local list = getList(kind)
+        local first = (st.page - 1) * CFG.PER_PAGE + 1
+        local last = math.min(#list, first + CFG.PER_PAGE - 1)
+        for i = first, last do
+            local item = list[i]
+            local cell = new("TextButton", {BackgroundColor3 = C.panel2, AutoButtonColor = false, Text = "", BorderSizePixel = 0, LayoutOrder = i, Parent = grid})
+            corner(cell, 6)
+            local sk = stroke(cell, item == ui.sel and C.cream or C.gold, 1.5, item == ui.sel and 0 or 0.8)
+            if item.thumb then
+                new("ImageLabel", {BackgroundTransparency = 1, Image = item.thumb, Position = UDim2.fromOffset(4, 3), Size = UDim2.new(1, -8, 1, -30), ScaleType = Enum.ScaleType.Fit, Parent = cell})
+                label({Position = UDim2.new(0, 3, 1, -26), Size = UDim2.new(1, -6, 0, 24), Text = item.name, TextSize = 10, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Center, TextYAlignment = Enum.TextYAlignment.Top, Parent = cell})
+            else
+                label({Position = UDim2.fromOffset(4, 4), Size = UDim2.new(1, -8, 1, -8), Text = item.name, TextSize = 12, Font = Enum.Font.GothamMedium, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Center, Parent = cell})
+            end
+            ui.cells[item] = {cell = cell, stroke = sk}
+            cell.MouseButton1Click:Connect(function()
+                ui.select(item)
+            end)
+        end
+        msg.Visible = last < first
+        if st.loading then
+            msg.Text = "Loading..."
+        elseif st.failed then
+            msg.Text = "Request failed. Check your executor's HTTP support."
+        else
+            msg.Text = "No results"
+        end
+        local more = st.source == "catalog" and not st.exhausted
+        pageLbl.Text = string.format("Page %d  \u{2022}  %d items%s", st.page, #list, more and "  \u{2022}  more +" or "")
+        grid.CanvasPosition = Vector2.new(0, 0)
+        setActive(catBtn, st.source == "catalog")
+        setActive(biBtn, st.source ~= "catalog")
+        sortBtn.TextTransparency = st.source == "catalog" and 0 or 0.55
+    end
+
+    local function doSearch()
+        st.keyword = box.Text
+        st.page = 1
+        if st.source == "catalog" then
+            runSearch(kind, true)
+        else
+            ui.refresh()
+        end
+    end
+
+    local function setSource(src)
+        if st.source == src then
+            return
+        end
+        st.source = src
+        st.page = 1
+        if src == "catalog" and not st.started then
+            st.started = true
+            runSearch(kind, true)
+        else
+            ui.refresh()
+        end
+    end
+
+    goBtn.MouseButton1Click:Connect(doSearch)
+    box.FocusLost:Connect(function(enter)
+        if enter then
+            doSearch()
+        end
+    end)
+    sortBtn.MouseButton1Click:Connect(function()
+        if st.source ~= "catalog" then
+            return
+        end
+        st.sortIdx = st.sortIdx % #SORTS + 1
+        sortBtn.Text = SORTS[st.sortIdx][1]
+        runSearch(kind, true)
+    end)
+    catBtn.MouseButton1Click:Connect(function()
+        setSource("catalog")
+    end)
+    biBtn.MouseButton1Click:Connect(function()
+        setSource("builtin")
+    end)
+    prevBtn.MouseButton1Click:Connect(function()
+        if st.page > 1 then
+            st.page -= 1
+            ui.refresh()
+        end
+    end)
+    nextBtn.MouseButton1Click:Connect(function()
+        local list = getList(kind)
+        if #list > st.page * CFG.PER_PAGE then
+            st.page += 1
+            ui.refresh()
+        elseif st.source == "catalog" and not st.exhausted and not st.loading then
+            st.page += 1
+            runSearch(kind, false)
+        end
+    end)
+
+    copyBtn.MouseButton1Click:Connect(function()
+        if ui.sel then
+            say(copy(numOf(ui.sel.id) or ui.sel.id) and "Copied ID" or "Clipboard not supported", C.green)
+        end
+    end)
+
+    if isEmote then
+        addBtn.MouseButton1Click:Connect(function()
+            if not ui.sel then
+                say("Select an emote first")
+                return
+            end
+            addToWheel(ui.sel)
+        end)
+        playBtn.MouseButton1Click:Connect(function()
+            if ui.sel then
+                playEmote(ui.sel)
+            else
+                say("Select an emote first")
+            end
+        end)
+    else
+        addBtn.MouseButton1Click:Connect(function()
+            if not ui.sel or not ui.states then
+                say("Select a bundle first")
+                return
+            end
+            local n = 0
+            for _, def in ipairs(STATES) do
+                local e = ui.states[def.key]
+                if e then
+                    store.loadout[def.key] = {id = e.id, id2 = e.id2, name = ui.sel.name}
+                    n += 1
+                end
+            end
+            afterLoadoutChange(string.format("Bundle '%s' added to Loadout (%d states). Check the Inventory tab.", ui.sel.name, n))
+        end)
+        addStateBtn.MouseButton1Click:Connect(function()
+            if not ui.sel or not ui.states or not ui.state or not ui.states[ui.state] then
+                say("Select a bundle and a state first")
+                return
+            end
+            local e = ui.states[ui.state]
+            store.loadout[ui.state] = {id = e.id, id2 = e.id2, name = ui.sel.name}
+            afterLoadoutChange(string.format("%s set from '%s'", STATE_BY_KEY[ui.state].label, ui.sel.name))
+        end)
+    end
+
+    -- Preset panel (Animations tab only). Created last so it draws on top of the page.
+    if not isEmote then
+        local GOLD_Y = Color3.fromRGB(240, 196, 60)
+        local panel = new("Frame", {
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundColor3 = C.panel,
+            BorderSizePixel = 0,
+            Active = true,
+            Visible = false,
+            ZIndex = 20,
+            Parent = parent,
+        })
+        corner(panel, 8)
+        stroke(panel, GOLD_Y, 1.5, 0.3)
+
+        label({Position = UDim2.fromOffset(12, 8), Size = UDim2.new(1, -90, 0, 28), Text = "Animation Presets", Font = CFG.TITLE_FONT, TextSize = 24, TextColor3 = C.gold, Parent = panel})
+        local closeBtn = button({Text = "Close", AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 10), Size = UDim2.fromOffset(60, 24), Parent = panel})
+
+        local nameBox = new("TextBox", {
+            Position = UDim2.fromOffset(10, 44),
+            Size = UDim2.new(1, -132, 0, 28),
+            BackgroundColor3 = C.panel2,
+            BorderSizePixel = 0,
+            TextColor3 = C.cream,
+            PlaceholderText = "Preset name (optional)...",
+            PlaceholderColor3 = C.dim,
+            Text = "",
+            ClearTextOnFocus = false,
+            Font = Enum.Font.Gotham,
+            TextSize = 12,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            ClipsDescendants = true,
+            Parent = panel,
+        })
+        corner(nameBox, 6)
+        stroke(nameBox, C.gold, 1, 0.7)
+        pad(nameBox, 10, 0, 10, 0)
+        local saveBtn = button({Text = "Save current", AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 44), Size = UDim2.fromOffset(112, 28), Parent = panel})
+        setActive(saveBtn, true)
+
+        label({Position = UDim2.fromOffset(12, 76), Size = UDim2.new(1, -24, 0, 14), Text = "Saves your current Animation Loadout (see the Inventory tab).", TextSize = 10, TextColor3 = C.dim, TextTruncate = Enum.TextTruncate.AtEnd, Parent = panel})
+
+        local list = new("ScrollingFrame", {
+            Position = UDim2.fromOffset(10, 96),
+            Size = UDim2.new(1, -20, 1, -106),
+            BackgroundColor3 = C.bg,
+            BorderSizePixel = 0,
+            ScrollBarThickness = 4,
+            ScrollBarImageColor3 = C.gold,
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            CanvasSize = UDim2.new(),
+            ScrollingDirection = Enum.ScrollingDirection.Y,
+            Parent = panel,
+        })
+        corner(list, 6)
+        pad(list, 6, 6, 6, 6)
+        new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = list})
+        local emptyLbl = label({Size = UDim2.new(1, 0, 0, 30), Text = "No presets saved yet.", TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Center, LayoutOrder = 0, Parent = list})
+
+        local function countStates(lo)
+            local n = 0
+            for _ in pairs(lo) do
+                n += 1
+            end
+            return n
+        end
+
+        local function loadPreset(p)
+            store.loadout = readLoadout(p.loadout)
+            save()
+            refreshInventory()
+            -- States missing from the preset fall back to your original animations.
+            local tbl = {}
+            for _, def in ipairs(STATES) do
+                tbl[def.key] = store.loadout[def.key] or origEntry(def.key) or DEFAULT_STATES[def.key]
+            end
+            applyLoadout(tbl)
+            stopEmote()
+            playBase()
+            say("Preset '" .. p.name .. "' loaded", C.green)
+        end
+
+        local refreshPresets
+        refreshPresets = function()
+            for _, c in ipairs(list:GetChildren()) do
+                if c:IsA("Frame") then
+                    c:Destroy()
+                end
+            end
+            emptyLbl.Visible = #store.presets == 0
+            for i, p in ipairs(store.presets) do
+                local row = new("Frame", {Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = C.panel2, BorderSizePixel = 0, LayoutOrder = i, Parent = list})
+                corner(row, 5)
+                stroke(row, C.gold, 1, 0.8)
+                label({Position = UDim2.fromOffset(8, 0), Size = UDim2.new(1, -208, 1, 0), Text = p.name, Font = Enum.Font.GothamMedium, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row})
+                label({AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -134, 0, 0), Size = UDim2.fromOffset(60, 32), Text = countStates(p.loadout) .. " states", TextSize = 10, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Right, Parent = row})
+                local loadBtn = button({Text = "Load", AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -68, 0.5, 0), Size = UDim2.fromOffset(56, 22), Parent = row})
+                setActive(loadBtn, true)
+                local delBtn = button({Text = "Delete", AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -6, 0.5, 0), Size = UDim2.fromOffset(56, 22), Parent = row})
+                loadBtn.MouseButton1Click:Connect(function()
+                    loadPreset(p)
+                end)
+                confirmClick(delBtn, function()
+                    local idx = table.find(store.presets, p)
+                    if idx then
+                        table.remove(store.presets, idx)
+                        save()
+                        refreshPresets()
+                        say("Preset '" .. p.name .. "' deleted", C.green)
+                    end
+                end)
+            end
+        end
+
+        local function savePreset()
+            if not next(store.loadout) then
+                say("Your loadout is empty. Add some animations first.", C.red)
+                return
+            end
+            local name = nameBox.Text:match("^%s*(.-)%s*$") or ""
+            name = name:sub(1, 24)
+            if name == "" then
+                name = "Preset " .. (#store.presets + 1)
+            end
+            local existing
+            for _, p in ipairs(store.presets) do
+                if p.name:lower() == name:lower() then
+                    existing = p
+                    break
+                end
+            end
+            if existing then
+                existing.loadout = readLoadout(store.loadout)
+                say("Preset '" .. existing.name .. "' updated", C.green)
+            else
+                if #store.presets >= CFG.MAX_PRESETS then
+                    say("Preset limit reached (" .. CFG.MAX_PRESETS .. "). Delete one first.", C.red)
+                    return
+                end
+                store.presets[#store.presets + 1] = {name = name, loadout = readLoadout(store.loadout)}
+                say("Preset '" .. name .. "' saved", C.green)
+            end
+            nameBox.Text = ""
+            save()
+            refreshPresets()
+        end
+
+        saveBtn.MouseButton1Click:Connect(savePreset)
+        nameBox.FocusLost:Connect(function(enter)
+            if enter then
+                savePreset()
+            end
+        end)
+        closeBtn.MouseButton1Click:Connect(function()
+            panel.Visible = false
+        end)
+        presetBtn.MouseButton1Click:Connect(function()
+            panel.Visible = not panel.Visible
+            if panel.Visible then
+                refreshPresets()
+            end
+        end)
+    end
+
+    ui.refresh()
+end
+
+buildBrowse("emotes", pages.Emotes)
+buildBrowse("anims", pages.Animations)
+
+local function makeSlot(parent, i, props)
+    local b = new("TextButton", with({BackgroundColor3 = C.panel2, AutoButtonColor = false, Text = "", BorderSizePixel = 0}, props))
+    b.Parent = parent
+    corner(b, 8)
+    local s = stroke(b, C.gold, 1.5, 0.8)
+    local thumb = new("ImageLabel", {BackgroundTransparency = 1, Position = UDim2.new(0.5, -22, 0, 4), Size = UDim2.fromOffset(44, 44), ScaleType = Enum.ScaleType.Fit, Parent = b})
+    local glyph = label({Position = UDim2.new(0.5, -22, 0, 4), Size = UDim2.fromOffset(44, 44), TextSize = 22, Font = Enum.Font.GothamBold, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Center, Parent = b})
+    local nm = label({Position = UDim2.new(0, 3, 1, -26), Size = UDim2.new(1, -6, 0, 24), TextSize = 10, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Center, TextYAlignment = Enum.TextYAlignment.Top, Parent = b})
+    label({Position = UDim2.fromOffset(6, 3), Size = UDim2.fromOffset(14, 14), Text = tostring(i), TextSize = 11, Font = Enum.Font.GothamBold, TextColor3 = C.gold, Parent = b})
+    return {btn = b, stroke = s, thumb = thumb, glyph = glyph, name = nm}
+end
+
+local function fillSlot(s, e)
+    s.name.Text = e and e.name or "Empty"
+    s.name.TextColor3 = e and C.cream or C.dim
+    if e and not e.direct then
+        s.thumb.Image = thumbUrl(e.id)
+        s.thumb.Visible = true
+        s.glyph.Text = ""
+    else
+        s.thumb.Image = ""
+        s.thumb.Visible = false
+        s.glyph.Text = e and string.upper(string.sub(e.name, 1, 1)) or "+"
+    end
+end
+
+local function sectionHeader(parent, text, order)
+    local h = new("Frame", {Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, LayoutOrder = order, Parent = parent})
+    label({Size = UDim2.new(0, 150, 1, 0), Text = text, Font = CFG.TITLE_FONT, TextSize = 20, TextColor3 = C.gold, Parent = h})
+    local bar = new("Frame", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Parent = h})
+    new("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, HorizontalAlignment = Enum.HorizontalAlignment.Right, VerticalAlignment = Enum.VerticalAlignment.Center, Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = bar})
+    return h, bar
+end
+
+-- Used by the Inventory tab, the wheel hub and the keybind handler.
+local changePage
+
+-- Inventory tab. Wrapped in do...end to free its locals (200-local limit per function).
+do
+    local inv = pages.Inventory
+
+    local function previewEntry(e)
+        task.spawn(function()
+            local id = resolveEmote(e)
+            playPreview(id)
+            setCaption(e.name)
+            say("Previewing " .. e.name)
+        end)
+    end
+
+    local _, wheelBar = sectionHeader(inv, "Emote Wheel", 1)
+    local pPrev = button({Text = "<", Size = UDim2.fromOffset(24, 22), LayoutOrder = 1, Parent = wheelBar})
+    local invPageLbl = label({Size = UDim2.fromOffset(40, 22), Text = "1/1", TextXAlignment = Enum.TextXAlignment.Center, LayoutOrder = 2, Parent = wheelBar})
+    local pNext = button({Text = ">", Size = UDim2.fromOffset(24, 22), LayoutOrder = 3, Parent = wheelBar})
+    local pAdd = button({Text = "+ Page", Size = UDim2.fromOffset(50, 22), LayoutOrder = 4, Parent = wheelBar})
+    local pDel = button({Text = "Delete", Size = UDim2.fromOffset(48, 22), LayoutOrder = 5, Parent = wheelBar})
+
+    local slotsFrame = new("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = 2, Parent = inv})
+    new("UIGridLayout", {CellSize = UDim2.fromOffset(98, 78), CellPadding = UDim2.fromOffset(6, 6), SortOrder = Enum.SortOrder.LayoutOrder, Parent = slotsFrame})
+
+    local invSlots = {}
+    for i = 1, CFG.SLOTS do
+        local s = makeSlot(slotsFrame, i, {LayoutOrder = i})
+        invSlots[i] = s
+        s.btn.MouseButton1Click:Connect(function()
+            store.slot = i
+            save()
+            refreshInventory()
+            local e = store.pages[store.page][i]
+            if e then
+                previewEntry(e)
+            end
+        end)
+    end
+
+    local slotActions = new("Frame", {Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, LayoutOrder = 3, Parent = inv})
+    new("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = slotActions})
+    local slotPlay = button({Text = "Play on me", Size = UDim2.new(0.3333, -3, 1, 0), LayoutOrder = 1, Parent = slotActions})
+    local slotRemove = button({Text = "Remove slot", Size = UDim2.new(0.3333, -3, 1, 0), LayoutOrder = 2, Parent = slotActions})
+    local slotClear = button({Text = "Clear page", Size = UDim2.new(0.3333, -3, 1, 0), LayoutOrder = 3, Parent = slotActions})
+
+    local _, loadBar = sectionHeader(inv, "Animation Loadout", 4)
+    local applyBtn = button({Text = "Apply", Size = UDim2.fromOffset(52, 22), LayoutOrder = 1, Parent = loadBar})
+    local resetBtn = button({Text = "Reset all", Size = UDim2.fromOffset(64, 22), LayoutOrder = 2, Parent = loadBar})
+    local origBtn = button({Text = "Reset Anim", Size = UDim2.fromOffset(76, 22), LayoutOrder = 3, Parent = loadBar})
+
+    local rowsFrame = new("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = 5, Parent = inv})
+    new("UIGridLayout", {CellSize = UDim2.new(0.5, -3, 0, 28), CellPadding = UDim2.fromOffset(6, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = rowsFrame})
+
+    local loadRows = {}
+    for i, def in ipairs(STATES) do
+        local row = new("TextButton", {BackgroundColor3 = C.panel2, AutoButtonColor = false, Text = "", BorderSizePixel = 0, LayoutOrder = i, Parent = rowsFrame})
+        corner(row, 5)
+        stroke(row, C.gold, 1, 0.8)
+        label({Position = UDim2.fromOffset(8, 0), Size = UDim2.fromOffset(44, 28), Text = def.label, Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.gold, Parent = row})
+        local nm = label({Position = UDim2.fromOffset(54, 0), Size = UDim2.new(1, -84, 1, 0), TextSize = 11, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row})
+        local x = button({Text = "x", AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -4, 0.5, 0), Size = UDim2.fromOffset(20, 20), BackgroundColor3 = C.bg, TextColor3 = C.red, Parent = row})
+        loadRows[def.key] = {name = nm}
+        row.MouseButton1Click:Connect(function()
+            local e = store.loadout[def.key]
+            if e then
+                playPreview(e.id, true)
+                setCaption(e.name .. " \u{2022} " .. def.label)
+                say("Previewing " .. def.label .. " from " .. e.name)
+            end
+        end)
+        x.MouseButton1Click:Connect(function()
+            if not store.loadout[def.key] then
+                return
+            end
+            store.loadout[def.key] = nil
+            save()
+            refreshInventory()
+            -- Go back to your original animation (falls back to the Roblox default if there is no snapshot)
+            applyLoadout({[def.key] = origEntry(def.key) or DEFAULT_STATES[def.key]})
+            if def.key == "idle" then
+                playBase()
+            end
+            say("Cleared " .. def.label .. " (back to original)", C.green)
+        end)
+    end
+
+    changePage = function(d)
+        local n = #store.pages
+        store.page = (store.page - 1 + d) % n + 1
+        save()
+        refreshInventory()
+    end
+
+    pPrev.MouseButton1Click:Connect(function()
+        changePage(-1)
+    end)
+    pNext.MouseButton1Click:Connect(function()
+        changePage(1)
+    end)
+    pAdd.MouseButton1Click:Connect(function()
+        if #store.pages >= CFG.MAX_PAGES then
+            say("Page limit reached (" .. CFG.MAX_PAGES .. ")", C.red)
+            return
+        end
+        store.pages[#store.pages + 1] = {}
+        store.page = #store.pages
+        store.slot = 1
+        save()
+        refreshInventory()
+    end)
+    confirmClick(pDel, function()
+        if #store.pages <= 1 then
+            store.pages[1] = {}
+        else
+            table.remove(store.pages, store.page)
+            store.page = math.clamp(store.page, 1, #store.pages)
+        end
+        store.slot = 1
+        save()
+        refreshInventory()
+        say("Page deleted", C.green)
+    end)
+
+    slotPlay.MouseButton1Click:Connect(function()
+        local e = store.pages[store.page][store.slot]
+        if e then
+            playEmote(e)
+        else
+            say("This slot is empty")
+        end
+    end)
+    slotRemove.MouseButton1Click:Connect(function()
+        if store.pages[store.page][store.slot] then
+            store.pages[store.page][store.slot] = nil
+            save()
+            refreshInventory()
+            say("Slot cleared", C.green)
+        end
+    end)
+    confirmClick(slotClear, function()
+        store.pages[store.page] = {}
+        save()
+        refreshInventory()
+        say("Page cleared", C.green)
+    end)
+
+    applyBtn.MouseButton1Click:Connect(function()
+        if next(store.loadout) then
+            applyLoadout()
+            say("Loadout applied", C.green)
+        else
+            say("Your loadout is empty")
+        end
+    end)
+    confirmClick(resetBtn, function()
+        store.loadout = {}
+        save()
+        refreshInventory()
+        applyLoadout(DEFAULT_STATES)
+        say("Loadout reset to Roblox default pack", C.green)
+    end)
+
+    -- Reset Anim: restore your character's original animations
+    confirmClick(origBtn, function()
+        local char = LP.Character
+        if not char or not char:FindFirstChild("Animate") then
+            say("Character / Animate script not found", C.red)
+            return
+        end
+        if not (origSnap and origSnap.char == char and next(origSnap.entries)) then
+            captureOriginal(char)
+        end
+        if not (origSnap and origSnap.char == char and next(origSnap.entries)) then
+            say("No original animation snapshot available", C.red)
+            return
+        end
+        store.loadout = {}
+        save()
+        refreshInventory()
+        applyLoadout(origSnap.entries)
+        stopEmote()
+        playBase()
+        say("Animations reset to your original ones", C.green)
+    end)
+
+    refreshInventory = function()
+        local pg = store.pages[store.page]
+        invPageLbl.Text = string.format("%d/%d", store.page, #store.pages)
+        for i = 1, CFG.SLOTS do
+            fillSlot(invSlots[i], pg[i])
+            invSlots[i].stroke.Transparency = i == store.slot and 0 or 0.8
+        end
+        for _, def in ipairs(STATES) do
+            local e = store.loadout[def.key]
+            local r = loadRows[def.key]
+            r.name.Text = e and e.name or "Original"
+            r.name.TextColor3 = e and C.cream or C.dim
+        end
+        for _, u in pairs(browseUI) do
+            u.refreshAdd()
+        end
+        refreshWheel()
+    end
+end
+
+local set = pages.Settings
+local listening = nil
+local keyBtns = {}
+local toggleBtns = {}
+
+local function settingRow(order, text, btnWidth)
+    local row = new("Frame", {Size = UDim2.new(1, 0, 0, 28), BackgroundColor3 = C.panel2, BorderSizePixel = 0, LayoutOrder = order, Parent = set})
+    corner(row, 5)
+    label({Position = UDim2.fromOffset(8, 0), Size = UDim2.new(1, -(btnWidth + 16), 1, 0), Text = text, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row})
+    local b = button({AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -4, 0.5, 0), Size = UDim2.fromOffset(btnWidth, 22), BackgroundColor3 = C.bg, Parent = row})
+    return b
+end
+
+sectionHeader(set, "Keybinds", 1)
+local keyDefs = {
+    {"toggle", "Toggle GUI"},
+    {"wheel", "Open emote wheel"},
+    {"prev", "Wheel previous page"},
+    {"next", "Wheel next page"},
+}
+for i, def in ipairs(keyDefs) do
+    local b = settingRow(1 + i, def[2], 110)
+    keyBtns[def[1]] = b
+    b.MouseButton1Click:Connect(function()
+        listening = def[1]
+        refreshKeys()
+    end)
+end
+
+sectionHeader(set, "Behavior", 6)
+local toggleDefs = {
+    {"auto", "Auto-apply loadout on spawn"},
+    {"enforce", "Enforce loadout (re-apply if the game resets it)"},
+    {"closeOnPlay", "Close wheel after playing an emote"},
+    {"stopOnMove", "Stop emote when moving"},
+}
+for i, def in ipairs(toggleDefs) do
+    local b = settingRow(6 + i, def[2], 60)
+    toggleBtns[def[1]] = b
+    b.MouseButton1Click:Connect(function()
+        store[def[1]] = not store[def[1]]
+        save()
+        refreshToggles()
+        if def[1] == "auto" and store.auto and next(store.loadout) then
+            applyLoadout()
+        end
+    end)
+end
+
+do
+    sectionHeader(set, "Window & Data", 11)
+    local resetWinBtn = settingRow(12, "Reset window size and position", 80)
+    resetWinBtn.Text = "Reset"
+    local resetKeysBtn = settingRow(13, "Restore default keybinds", 80)
+    resetKeysBtn.Text = "Restore"
+    label({
+        Size = UDim2.new(1, 0, 0, 30),
+        LayoutOrder = 14,
+        TextSize = 11,
+        TextColor3 = C.dim,
+        TextWrapped = true,
+        TextYAlignment = Enum.TextYAlignment.Top,
+        Text = canFile and ("Auto-save is on (" .. CFG.SAVE_FILE .. "). Your wheel, loadout, presets and settings persist across respawn, rejoin and re-execute.") or "Auto-save is unavailable: your executor does not support file functions.",
+        Parent = set,
+    })
+
+    resetWinBtn.MouseButton1Click:Connect(function()
+        resetWin()
+        persistWin()
+        say("Window reset", C.green)
+    end)
+    resetKeysBtn.MouseButton1Click:Connect(function()
+        for k, v in pairs(DEFAULT_KEYS) do
+            store.keys[k] = v
+        end
+        listening = nil
+        save()
+        refreshKeys()
+        say("Keybinds restored", C.green)
+    end)
+end
+
+refreshToggles = function()
+    for k, b in pairs(toggleBtns) do
+        b.Text = store[k] and "On" or "Off"
+        b.TextColor3 = store[k] and C.green or C.red
+    end
+end
+
+local wheelGui = new("ScreenGui", {
+    Name = "EmoteStudioWheel",
+    ResetOnSpawn = false,
+    IgnoreGuiInset = true,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    DisplayOrder = 1000,
+    Enabled = false,
+})
+pcall(function()
+    if syn and syn.protect_gui then
+        syn.protect_gui(wheelGui)
+    end
+end)
+wheelGui.Parent = guiParent()
+
+local wheelRoot = new("Frame", {AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(330, 330), BackgroundTransparency = 1, Parent = wheelGui})
+local wheelBg = new("Frame", {AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(326, 326), BackgroundColor3 = C.bg, BackgroundTransparency = 0.2, BorderSizePixel = 0, Parent = wheelRoot})
+corner(wheelBg, 163)
+stroke(wheelBg, C.gold, 1.5, 0.4)
+
+local hub = new("Frame", {AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(116, 64), BackgroundTransparency = 1, Parent = wheelRoot})
+local wPrev = button({Text = "<", Size = UDim2.fromOffset(24, 22), Parent = hub})
+local wheelPageLbl = label({Position = UDim2.fromOffset(26, 0), Size = UDim2.new(1, -52, 0, 22), Text = "1/1", TextXAlignment = Enum.TextXAlignment.Center, Font = Enum.Font.GothamBold, TextColor3 = C.gold, Parent = hub})
+local wNext = button({Text = ">", AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.fromOffset(24, 22), Parent = hub})
+local wheelHint = label({Position = UDim2.fromOffset(0, 28), Size = UDim2.new(1, 0, 0, 34), TextSize = 10, TextColor3 = C.dim, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Center, TextYAlignment = Enum.TextYAlignment.Top, Parent = hub})
+
+local wheelSlots = {}
+local WHEEL_R = 112
+
+local function playWheelSlot(i)
+    local e = store.pages[store.page][i]
+    if not e then
+        return
+    end
+    playEmote(e)
+    if store.closeOnPlay then
+        wheelGui.Enabled = false
+    end
+end
+
+for i = 1, CFG.SLOTS do
+    local ang = (i - 1) / CFG.SLOTS * math.pi * 2 - math.pi / 2
+    local s = makeSlot(wheelRoot, i, {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.new(0.5, math.cos(ang) * WHEEL_R, 0.5, math.sin(ang) * WHEEL_R),
+        Size = UDim2.fromOffset(76, 76),
+    })
+    wheelSlots[i] = s
+    s.btn.MouseButton1Click:Connect(function()
+        playWheelSlot(i)
+    end)
+end
+
+refreshWheel = function()
+    local pg = store.pages[store.page]
+    for i = 1, CFG.SLOTS do
+        fillSlot(wheelSlots[i], pg[i])
+        wheelSlots[i].stroke.Transparency = pg[i] and 0.4 or 0.85
+    end
+    wheelPageLbl.Text = string.format("%d/%d", store.page, #store.pages)
+end
+
+local function toggleWheel()
+    wheelGui.Enabled = not wheelGui.Enabled
+    if wheelGui.Enabled then
+        refreshWheel()
+    end
+end
+
+wPrev.MouseButton1Click:Connect(function()
+    changePage(-1)
+end)
+wNext.MouseButton1Click:Connect(function()
+    changePage(1)
+end)
+wheelBtn.MouseButton1Click:Connect(toggleWheel)
+
+refreshKeys = function()
+    for id, b in pairs(keyBtns) do
+        if listening == id then
+            b.Text = "Press a key..."
+            b.TextColor3 = C.gold
+        else
+            b.Text = store.keys[id]
+            b.TextColor3 = C.cream
+        end
+    end
+    wheelBtn.Text = "Open Wheel (" .. store.keys.wheel .. ")"
+    topHint.Text = store.keys.toggle .. " = hide  |  " .. store.keys.wheel .. " = emote wheel"
+    wheelHint.Text = string.format("%s / %s: page\n1-8: play", store.keys.prev, store.keys.next)
+end
+
+setVisible = function(v)
+    gui.Enabled = v
+    if not v then
+        pcall(function()
+            StarterGui:SetCore("SendNotification", {
+                Title = "Emote Studio",
+                Text = "Hidden. Press " .. store.keys.toggle .. " to show it again.",
+                Duration = 4,
+            })
+        end)
+    end
+end
+
+setTab = function(name)
+    if not pages[name] then
+        name = "Emotes"
+    end
+    store.tab = name
+    for n, p in pairs(pages) do
+        p.Visible = n == name
+    end
+    for n, b in pairs(tabButtons) do
+        setActive(b, n == name)
+    end
+    local kind = KIND_BY_TAB[name]
+    if kind and not S[kind].started then
+        S[kind].started = true
+        runSearch(kind, true)
+    end
+    save()
+end
+
+hideBtn.MouseButton1Click:Connect(function()
+    setVisible(false)
+end)
+
+local function cleanup()
+    saveNow()
+    alive = false
+    for _, c in ipairs(conns) do
+        pcall(function()
+            c:Disconnect()
+        end)
+    end
+    for _, t in ipairs(glowTweens) do
+        pcall(function()
+            t:Cancel()
+        end)
+    end
+    stopEmote()
+    pcall(function()
+        gui:Destroy()
+    end)
+    pcall(function()
+        wheelGui:Destroy()
+    end)
+    genv.__EmoteStudioCleanup = nil
+end
+
+genv.__EmoteStudioCleanup = cleanup
+
+unloadBtn.MouseButton1Click:Connect(cleanup)
+
+do
+    local KEYNUM = {
+        [Enum.KeyCode.One] = 1,
+        [Enum.KeyCode.Two] = 2,
+        [Enum.KeyCode.Three] = 3,
+        [Enum.KeyCode.Four] = 4,
+        [Enum.KeyCode.Five] = 5,
+        [Enum.KeyCode.Six] = 6,
+        [Enum.KeyCode.Seven] = 7,
+        [Enum.KeyCode.Eight] = 8,
+        [Enum.KeyCode.KeypadOne] = 1,
+        [Enum.KeyCode.KeypadTwo] = 2,
+        [Enum.KeyCode.KeypadThree] = 3,
+        [Enum.KeyCode.KeypadFour] = 4,
+        [Enum.KeyCode.KeypadFive] = 5,
+        [Enum.KeyCode.KeypadSix] = 6,
+        [Enum.KeyCode.KeypadSeven] = 7,
+        [Enum.KeyCode.KeypadEight] = 8,
+    }
+
+    local KEY_LABELS = {}
+    for _, d in ipairs(keyDefs) do
+        KEY_LABELS[d[1]] = d[2]
+    end
+
+    bind(UserInputService.InputBegan, function(input)
+        if input.UserInputType ~= Enum.UserInputType.Keyboard then
+            return
+        end
+        local kc = input.KeyCode
+        if listening then
+            if kc == Enum.KeyCode.Unknown then
+                return
+            end
+            if kc ~= Enum.KeyCode.Escape then
+                local conflict
+                for id, name in pairs(store.keys) do
+                    if id ~= listening and name == kc.Name then
+                        conflict = id
+                    end
+                end
+                if conflict then
+                    say(kc.Name .. " is already used for: " .. KEY_LABELS[conflict], C.red)
+                else
+                    store.keys[listening] = kc.Name
+                    save()
+                    say("Bound " .. KEY_LABELS[listening] .. " to " .. kc.Name, C.green)
+                end
+            end
+            listening = nil
+            refreshKeys()
+            return
+        end
+        if UserInputService:GetFocusedTextBox() then
+            return
+        end
+        local name = kc.Name
+        local keys = store.keys
+        if name == keys.toggle then
+            setVisible(not gui.Enabled)
+        elseif name == keys.wheel then
+            toggleWheel()
+        elseif wheelGui.Enabled then
+            if name == keys.prev then
+                changePage(-1)
+            elseif name == keys.next then
+                changePage(1)
+            elseif KEYNUM[kc] then
+                playWheelSlot(KEYNUM[kc])
+            end
+        end
+    end)
+end
+
+local function onCharacter(char)
+    task.spawn(function()
+        local hum = char:WaitForChild("Humanoid", 10)
+        local animate = char:WaitForChild("Animate", 10)
+        if not alive or not hum or not animate then
+            return
+        end
+        -- Take the snapshot of the original animations BEFORE the loadout is applied
+        captureOriginal(char)
+        task.wait(0.6)
+        if alive and store.auto and next(store.loadout) and char.Parent then
+            applyLoadout()
+        end
+        task.wait(0.6)
+        if alive and char.Parent then
+            buildModel()
+        end
+    end)
+end
+
+bind(LP.CharacterAdded, onCharacter)
+
+task.spawn(function()
+    while alive do
+        task.wait(1.5)
+        if store.auto and store.enforce and next(store.loadout) and not applying then
+            local char = LP.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            local animate = char and char:FindFirstChild("Animate")
+            if hum and animate and hum.Health > 0 and hum.RigType == Enum.HumanoidRigType.R15 and not animate.Disabled and needsReapply(animate) then
+                applyLoadout()
+            end
+        end
+    end
+end)
+
+refreshInventory()
+refreshKeys()
+refreshToggles()
+refreshLoopBtn()
+setTab(store.tab)
+setSpeed(pv.speed)
+say("Ready. Press " .. store.keys.toggle .. " to hide or show.")
+
+if LP.Character then
+    onCharacter(LP.Character)
+end
