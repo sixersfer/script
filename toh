@@ -1,0 +1,1667 @@
+--// Stage Teleporter v18 | THE Tower of Hell | Mobile friendly glass dashboard
+local Players=game:GetService("Players")
+local RunService=game:GetService("RunService")
+local UIS=game:GetService("UserInputService")
+local TweenService=game:GetService("TweenService")
+local HttpService=game:GetService("HttpService")
+local VirtualUser=game:GetService("VirtualUser")
+local GuiService=game:GetService("GuiService")
+local Workspace=game:GetService("Workspace")
+local lp=Players.LocalPlayer
+local env=(getgenv and getgenv()) or _G
+if env.__STP_Unload then pcall(env.__STP_Unload) end
+------------------------------------------------------------ CONSTANTS
+local CFG_VER=18
+local FILE="StageTeleporter_Config.json"
+local ANTI_MODEL="Ihgvizgvizgvizcizt34"
+local STEP_INDEX=15
+local FINISH_INDEX=10
+local SKIP_PATH={"Menu","Container","Main","Customize","ControlFooter","ImageButton"}
+local SKIP_TEXT="skip round"
+local FINISH_NAMES={"GLOW ONLY","PAD [10] ONLY","GLOW > PAD","PAD > GLOW"}
+local ACCENTS={
+    {n="CYAN",c=Color3.fromRGB(0,220,255)},{n="PINK",c=Color3.fromRGB(255,80,170)},
+    {n="PURPLE",c=Color3.fromRGB(150,90,255)},{n="MINT",c=Color3.fromRGB(80,255,170)},
+    {n="ORANGE",c=Color3.fromRGB(255,150,50)},{n="RED",c=Color3.fromRGB(255,70,70)},
+    {n="INDIGO",c=Color3.fromRGB(128,142,230)},
+}
+local DEFAULT_ACCENT=7
+local MENU_KEYS={"RightShift","RightControl","Insert","Home","RightAlt"}
+local UI_SCALES={{n="AUTO"},{n="75%",m=0.75},{n="90%",m=0.9},{n="100%",m=1},{n="120%",m=1.2}}
+local UI_SCALE_NAMES={}
+for i,s in ipairs(UI_SCALES) do UI_SCALE_NAMES[i]=s.n end
+local LAYOUT_NAMES={"AUTO","COMPACT","FULL"}
+local FAB_NAMES={"AUTO","ON","OFF"}
+local DEFAULTS={
+    ver=CFG_VER,tpMode=2,flySpeed=90,noclip=true,antiDeath=true,antiAfk=true,
+    autoMethod=1,autoTarget=1,autoSpeed=55,autoDelayMin=6,autoDelayMax=10,
+    resumeAfterDeath=true,autoOffWhenDone=true,stepsMove=2,glowMove=2,
+    finishMode=1,topWalkMin=3,topWalkMax=5,finishHold=2,finishReturn=true,newRoundDelay=5,
+    autoSkip=false,skipDelay=2,
+    syncGuard=true,syncDeaths=2,syncWindow=45,syncDelay=3,
+    orderMode=1,accentIndex=DEFAULT_ACCENT,transparency=0.08,notifications=true,menuKey=1,
+    uiX=-1,uiY=-1,
+    uiScaleMode=1,layoutMode=1,floatBtn=1,fabX=-1,fabY=-1,
+}
+------------------------------------------------------------ CONFIG
+local cfg={}
+for k,v in pairs(DEFAULTS) do cfg[k]=v end
+pcall(function()
+    if isfile and isfile(FILE) then
+        local d=HttpService:JSONDecode(readfile(FILE))
+        if type(d)=="table" then
+            for k,v in pairs(d) do
+                if DEFAULTS[k]~=nil and type(v)==type(DEFAULTS[k]) then cfg[k]=v end
+            end
+            local ver=tonumber(d.ver) or 0
+            if ver<12 then cfg.tpMode=2 cfg.stepsMove=2 cfg.glowMove=2 end
+            if ver<15 then cfg.finishMode=1 end
+            if ver<17 then cfg.accentIndex=DEFAULT_ACCENT end
+        end
+    end
+end)
+cfg.ver=CFG_VER
+if cfg.finishMode<1 or cfg.finishMode>4 then cfg.finishMode=1 end
+if cfg.accentIndex<1 or cfg.accentIndex>#ACCENTS then cfg.accentIndex=DEFAULT_ACCENT end
+if cfg.menuKey<1 or cfg.menuKey>#MENU_KEYS then cfg.menuKey=1 end
+if cfg.uiScaleMode<1 or cfg.uiScaleMode>#UI_SCALES then cfg.uiScaleMode=1 end
+if cfg.layoutMode<1 or cfg.layoutMode>3 then cfg.layoutMode=1 end
+if cfg.floatBtn<1 or cfg.floatBtn>3 then cfg.floatBtn=1 end
+local saveQueued=false
+local function saveCfg()
+    if saveQueued then return end
+    saveQueued=true
+    task.delay(0.3,function()
+        saveQueued=false
+        pcall(function() if writefile then writefile(FILE,HttpService:JSONEncode(cfg)) end end)
+    end)
+end
+------------------------------------------------------------ STATE
+local unloaded=false
+local conns={}
+local function addConn(c) conns[#conns+1]=c return c end
+local autoEnabled=false
+local runId=0
+local statusText="IDLE"
+local function setStatus(s) statusText=s end
+local st={progress=0,finished=false,fSnap=nil,touchAt=0,deaths={},needResume=false,
+    inComplete=false,roundDone=false,rSnap=nil,needInit=false}
+local refreshUI=function() end
+local toastFn
+local function notify(t)
+    if cfg.notifications and toastFn then pcall(toastFn,t) end
+end
+local function char() return lp.Character end
+local function hum() local c=lp.Character return c and c:FindFirstChildOfClass("Humanoid") end
+local function hrp() local c=lp.Character return c and c:FindFirstChild("HumanoidRootPart") end
+local function alive(id) return id==runId and autoEnabled and not unloaded end
+------------------------------------------------------------ GEOMETRY HELPERS
+local function partsOf(inst)
+    local t={}
+    if not inst then return t end
+    if inst:IsA("BasePart") then t[1]=inst end
+    for _,d in ipairs(inst:GetDescendants()) do if d:IsA("BasePart") then t[#t+1]=d end end
+    return t
+end
+local function boundsOf(inst)
+    local mn,mx
+    for _,p in ipairs(partsOf(inst)) do
+        local cf,s=p.CFrame,p.Size
+        local r,u,l=cf.RightVector,cf.UpVector,cf.LookVector
+        local ex=(math.abs(r.X)*s.X+math.abs(u.X)*s.Y+math.abs(l.X)*s.Z)/2
+        local ey=(math.abs(r.Y)*s.X+math.abs(u.Y)*s.Y+math.abs(l.Y)*s.Z)/2
+        local ez=(math.abs(r.Z)*s.X+math.abs(u.Z)*s.Y+math.abs(l.Z)*s.Z)/2
+        local a=cf.Position-Vector3.new(ex,ey,ez)
+        local b=cf.Position+Vector3.new(ex,ey,ez)
+        if not mn then mn,mx=a,b else
+            mn=Vector3.new(math.min(mn.X,a.X),math.min(mn.Y,a.Y),math.min(mn.Z,a.Z))
+            mx=Vector3.new(math.max(mx.X,b.X),math.max(mx.Y,b.Y),math.max(mx.Z,b.Z))
+        end
+    end
+    return mn,mx
+end
+local function posOf(inst)
+    if not inst then return nil end
+    if inst:IsA("BasePart") then return inst.Position end
+    if inst:IsA("Model") then return inst:GetPivot().Position end
+    local mn,mx=boundsOf(inst)
+    if mn then return (mn+mx)/2 end
+end
+local function standPos(part)
+    if part and part:IsA("BasePart") then
+        return part.Position+Vector3.new(0,math.min(part.Size.Y/2,8)+3,0)
+    end
+    local p=posOf(part) or Vector3.zero
+    return p+Vector3.new(0,3,0)
+end
+local function segDist(p,a,b)
+    local ab=b-a
+    local l2=ab:Dot(ab)
+    if l2<1e-6 then return (p-a).Magnitude end
+    local t=math.clamp((p-a):Dot(ab)/l2,0,1)
+    return (p-(a+ab*t)).Magnitude
+end
+------------------------------------------------------------ SECTIONS
+local function towerFolder() return Workspace:FindFirstChild("tower") end
+local function sectionsFolder() local t=towerFolder() return t and t:FindFirstChild("sections") end
+local function numVal(i)
+    if i and i:IsA("ValueBase") and type(i.Value)=="number" then return i.Value end
+end
+local secCache,secT={},0
+local function getSections(force)
+    if not force and os.clock()-secT<1 then return secCache end
+    local list={}
+    local f=sectionsFolder()
+    if f then
+        for _,s in ipairs(f:GetChildren()) do
+            local nm=s.Name:lower()
+            if nm~="lobby" and nm~="finish" then
+                local a,b=s:FindFirstChild("start"),s:FindFirstChild("stop")
+                local pa=posOf(a)
+                if a and b and pa then
+                    list[#list+1]={inst=s,start=a,stop=b,center=s:FindFirstChild("center"),
+                        i=numVal(s:FindFirstChild("i")),y=pa.Y}
+                end
+            end
+        end
+    end
+    local useI=false
+    if cfg.orderMode~=3 and #list>0 then
+        useI=true
+        local seen={}
+        for _,s in ipairs(list) do
+            if not s.i then useI=false break end
+            if cfg.orderMode==1 and seen[s.i] then useI=false break end
+            seen[s.i]=true
+        end
+    end
+    if useI then table.sort(list,function(x,y) return x.i<y.i end)
+    else table.sort(list,function(x,y) return x.y<y.y end) end
+    secCache,secT=list,os.clock()
+    return list
+end
+local function currentIndex()
+    local r=hrp()
+    local list=getSections()
+    if not r or #list==0 then return nil,math.huge end
+    local best,bd
+    for i,s in ipairs(list) do
+        local d=segDist(r.Position,posOf(s.start),posOf(s.stop))
+        if not bd or d<bd then best,bd=i,d end
+    end
+    if autoEnabled and st.progress>0 then
+        local sp=math.clamp(st.progress,1,#list)
+        local d=segDist(r.Position,posOf(list[sp].start),posOf(list[sp].stop))
+        if d-bd<=12 then return sp,d end
+    end
+    return best,bd
+end
+------------------------------------------------------------ ANTI-DEATH
+local antiOn=false
+local antiGen=0
+local godConns={}
+local origHum={}
+local killParts={}
+local done38=setmetatable({},{__mode="k"})
+local hookedModel=setmetatable({},{__mode="k"})
+local function isKillName(s)
+    s=s:lower()
+    return s:find("kill") or s:find("lava") or s:find("death") or s:find("hazard")
+end
+local function noTouch(p)
+    if p:IsA("BasePart") and killParts[p]==nil then killParts[p]=p.CanTouch p.CanTouch=false end
+end
+local function antiModel() return Workspace:FindFirstChild(ANTI_MODEL) end
+local function scanKill(gen)
+    local m=antiModel()
+    if m then
+        for _,d in ipairs(m:GetDescendants()) do noTouch(d) end
+        if not hookedModel[m] then
+            hookedModel[m]=true
+            addConn(m.DescendantAdded:Connect(function(d) if antiOn then noTouch(d) end end))
+        end
+    end
+    local t=towerFolder()
+    if t then
+        local n=0
+        for _,d in ipairs(t:GetDescendants()) do
+            if d:IsA("BasePart") and (isKillName(d.Name) or (d.Parent and isKillName(d.Parent.Name))) then noTouch(d) end
+            n+=1
+            if n%800==0 then task.wait() if gen~=antiGen then return end end
+        end
+    end
+end
+local function antiTick()
+    local c=char()
+    if c then for _,x in ipairs(c:GetChildren()) do if x.Name=="hitbox" then pcall(function() x:Destroy() end) end end end
+    local m=antiModel()
+    if m then
+        for _,x in ipairs(m:GetChildren()) do if x.Name=="hitbox" then pcall(function() x:Destroy() end) end end
+        if not done38[m] then
+            done38[m]=true
+            local ch=m:GetChildren()
+            if ch[38] then pcall(function() ch[38]:Destroy() end) end
+        end
+    end
+end
+local function applyGod(c)
+    local h=c:WaitForChild("Humanoid",5)
+    if not h or not antiOn then return end
+    if not origHum[h] then origHum[h]={bj=h.BreakJointsOnDeath,rn=h.RequiresNeck,mh=h.MaxHealth} end
+    h.BreakJointsOnDeath=false
+    h.RequiresNeck=false
+    h.MaxHealth=999999
+    h.Health=999999
+    pcall(function() h:SetStateEnabled(Enum.HumanoidStateType.Dead,false) end)
+    godConns[#godConns+1]=h.StateChanged:Connect(function(_,new)
+        if antiOn and new==Enum.HumanoidStateType.Dead then h:ChangeState(Enum.HumanoidStateType.Running) end
+    end)
+    godConns[#godConns+1]=h.HealthChanged:Connect(function(hp)
+        if antiOn and hp<h.MaxHealth then h.Health=h.MaxHealth end
+    end)
+end
+local function setAnti(on)
+    if on==antiOn then return end
+    antiOn=on
+    antiGen+=1
+    local gen=antiGen
+    if on then
+        local c=char()
+        if c then task.spawn(applyGod,c) end
+        task.spawn(function() while antiOn and gen==antiGen and not unloaded do antiTick() task.wait(0.1) end end)
+        task.spawn(function() while antiOn and gen==antiGen and not unloaded do scanKill(gen) task.wait(2) end end)
+    else
+        for _,c in ipairs(godConns) do c:Disconnect() end
+        godConns={}
+        for h,o in pairs(origHum) do
+            if h.Parent then
+                pcall(function()
+                    h:SetStateEnabled(Enum.HumanoidStateType.Dead,true)
+                    h.BreakJointsOnDeath=o.bj h.RequiresNeck=o.rn h.MaxHealth=o.mh
+                    h.Health=math.min(h.Health,o.mh)
+                end)
+            end
+        end
+        origHum={}
+        for p,v in pairs(killParts) do if p.Parent then p.CanTouch=v end end
+        killParts={}
+    end
+end
+local function syncAnti() setAnti(cfg.antiDeath or autoEnabled) end
+------------------------------------------------------------ ANTI AFK
+local function afkPing() pcall(function() VirtualUser:CaptureController() VirtualUser:ClickButton2(Vector2.new()) end) end
+addConn(lp.Idled:Connect(function() if cfg.antiAfk then afkPing() end end))
+task.spawn(function()
+    while not unloaded do
+        task.wait(45)
+        if cfg.antiAfk then afkPing() end
+    end
+end)
+------------------------------------------------------------ MOVEMENT
+local flightId=0
+local flying=false
+local flyNoclip=false
+local noclipParts={}
+local function applyNoclip()
+    local c=char()
+    if not c then return end
+    for _,p in ipairs(c:GetDescendants()) do
+        if p:IsA("BasePart") and p.CanCollide then noclipParts[p]=true p.CanCollide=false end
+    end
+end
+local function restoreCollide()
+    for p in pairs(noclipParts) do if p.Parent then p.CanCollide=true end end
+    noclipParts={}
+end
+local function cancelFlight()
+    flightId+=1
+    flying=false
+    restoreCollide()
+end
+addConn(RunService.Stepped:Connect(function()
+    if flying and flyNoclip and cfg.noclip then applyNoclip() end
+end))
+local function placeAt(pos)
+    local r=hrp()
+    if not r then return false end
+    r.CFrame=CFrame.new(pos)*(r.CFrame-r.CFrame.Position)
+    r.AssemblyLinearVelocity=Vector3.zero
+    r.AssemblyAngularVelocity=Vector3.zero
+    return true
+end
+local function instantTo(pos) cancelFlight() return placeAt(pos) end
+local function flyTo(pos,speed,nc)
+    local root=hrp()
+    if not root then return false end
+    cancelFlight()
+    flightId+=1
+    local id=flightId
+    flying=true
+    flyNoclip=nc and cfg.noclip
+    if flyNoclip then applyNoclip() end
+    speed=math.max(speed or 60,1)
+    local timeout=os.clock()+(root.Position-pos).Magnitude/speed+6
+    local lastD=(root.Position-pos).Magnitude
+    local lastT=os.clock()
+    local ok=true
+    while true do
+        local dt=RunService.Heartbeat:Wait()
+        if id~=flightId then return false end
+        local r=hrp()
+        if not r or r~=root or not r.Parent then ok=false break end
+        local cur=r.Position
+        local diff=pos-cur
+        local d=diff.Magnitude
+        if d<=1.5 then break end
+        if os.clock()>timeout then break end
+        if os.clock()-lastT>=2 then
+            if lastD-d<1 then break end
+            lastD,lastT=d,os.clock()
+        end
+        local np=cur+diff.Unit*math.min(d,speed*dt)
+        r.CFrame=CFrame.new(np)*(r.CFrame-r.CFrame.Position)
+        r.AssemblyLinearVelocity=Vector3.zero
+        r.AssemblyAngularVelocity=Vector3.zero
+    end
+    if id~=flightId then return false end
+    if ok then placeAt(pos) end
+    flying=false
+    restoreCollide()
+    return ok
+end
+local function goTo(pos,fly,speed,nc)
+    if fly then return flyTo(pos,speed,nc) end
+    return instantTo(pos)
+end
+------------------------------------------------------------ FINISH HELPERS
+local function finishModel() local f=sectionsFolder() return f and f:FindFirstChild("finish") end
+local function getGlow() local f=finishModel() return f and f:FindFirstChild("FinishGlow") end
+local function getFinishPad()
+    local t=towerFolder()
+    local f=t and t:FindFirstChild("finishes")
+    if not f then return nil end
+    local ch=f:GetChildren()
+    return ch[FINISH_INDEX] or ch[#ch]
+end
+local function getStepsTarget()
+    local f=finishModel()
+    local steps=f and f:FindFirstChild("steps")
+    if not steps then return nil end
+    local ch=steps:GetChildren()
+    local obj=ch[STEP_INDEX]
+    local fallback=false
+    if not obj then obj=ch[#ch] fallback=true notify("Step ke-"..STEP_INDEX.." ga ada, pakai step terakhir") end
+    if not obj then return nil end
+    local mn,mx=boundsOf(obj)
+    if not mn then return nil end
+    local pos=Vector3.new((mn.X+mx.X)/2,mx.Y+3,(mn.Z+mx.Z)/2)
+    local ext=math.clamp(math.min(mx.X-mn.X,mx.Z-mn.Z)/2-1,3,12)
+    return pos,ext,fallback,obj
+end
+local function getFinishTarget()
+    local pad=getFinishPad()
+    if not pad then return nil end
+    local mn,mx=boundsOf(pad)
+    if not mn then return nil end
+    return Vector3.new((mn.X+mx.X)/2,mx.Y+3,(mn.Z+mx.Z)/2)
+end
+local function glowTarget(g,mid)
+    local mn,mx=boundsOf(g)
+    if not mn then return nil end
+    local c=(mn+mx)/2
+    if mid then return c end
+    local params=RaycastParams.new()
+    params.FilterType=Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances={char() or Workspace,g}
+    local hit=Workspace:Raycast(Vector3.new(c.X,mx.Y,c.Z),Vector3.new(0,-300,0),params)
+    local y=hit and hit.Position.Y+3 or c.Y
+    y=math.clamp(y,mn.Y+1,math.max(mn.Y+1,mx.Y-1))
+    return Vector3.new(c.X,y,c.Z)
+end
+local function inFinishZone()
+    local r=hrp()
+    if not r then return false end
+    local p=r.Position
+    local function inside(inst,px,py)
+        if not inst then return false end
+        local mn,mx=boundsOf(inst)
+        if not mn then return false end
+        return p.X>=mn.X-px and p.X<=mx.X+px and p.Z>=mn.Z-px and p.Z<=mx.Z+px
+            and p.Y>=mn.Y-py and p.Y<=mx.Y+py
+    end
+    return inside(getGlow(),1,1) or inside(getFinishPad(),2,6)
+end
+local function lobbyPos()
+    local f=sectionsFolder()
+    local lob=f and f:FindFirstChild("lobby")
+    if lob then
+        for _,d in ipairs(lob:GetDescendants()) do if d:IsA("SpawnLocation") then return standPos(d) end end
+        local mn,mx=boundsOf(lob)
+        if mn then return Vector3.new((mn.X+mx.X)/2,mx.Y+4,(mn.Z+mx.Z)/2) end
+    end
+    local sp=Workspace:FindFirstChildWhichIsA("SpawnLocation",true)
+    if sp then return standPos(sp) end
+end
+------------------------------------------------------------ SKIP ROUND BUTTON
+local function btnHasSkipText(b)
+    for _,d in ipairs(b:GetDescendants()) do
+        if (d:IsA("TextLabel") or d:IsA("TextButton")) and type(d.Text)=="string"
+            and d.Text:lower():find(SKIP_TEXT,1,true) then return true end
+    end
+    if b:IsA("TextButton") and b.Text:lower():find(SKIP_TEXT,1,true) then return true end
+    return false
+end
+local function getSkipButton()
+    local pg=lp:FindFirstChild("PlayerGui")
+    if not pg then return nil end
+    local b=pg
+    for _,n in ipairs(SKIP_PATH) do b=b and b:FindFirstChild(n) end
+    if b and b:IsA("GuiButton") and btnHasSkipText(b) then return b end
+    local menu=pg:FindFirstChild("Menu")
+    if menu then
+        for _,d in ipairs(menu:GetDescendants()) do
+            if d:IsA("GuiButton") and btnHasSkipText(d) then return d end
+        end
+    end
+    if b and b:IsA("GuiButton") then return b end
+    return nil
+end
+local function pressButton(b)
+    if getconnections then
+        for _,sig in ipairs({b.Activated,b.MouseButton1Click}) do
+            local ok,cons=pcall(getconnections,sig)
+            if ok and type(cons)=="table" and #cons>0 then
+                for _,c in ipairs(cons) do pcall(function() c:Fire() end) end
+                return true,"connection"
+            end
+        end
+    end
+    local okV,vim=pcall(function() return game:GetService("VirtualInputManager") end)
+    if okV and vim and b.AbsoluteSize.X>0 then
+        local sg=b:FindFirstAncestorWhichIsA("ScreenGui")
+        local inset=Vector2.zero
+        if not (sg and sg.IgnoreGuiInset) then inset=GuiService:GetGuiInset() end
+        local c=b.AbsolutePosition+b.AbsoluteSize/2+inset
+        local ok=pcall(function()
+            vim:SendMouseButtonEvent(c.X,c.Y,0,true,game,0)
+            task.wait(0.06)
+            vim:SendMouseButtonEvent(c.X,c.Y,0,false,game,0)
+        end)
+        if ok then return true,"virtual click" end
+    end
+    if firesignal then
+        local ok=pcall(function() firesignal(b.Activated) end)
+        if not ok then ok=pcall(function() firesignal(b.MouseButton1Click) end) end
+        if ok then return true,"firesignal" end
+    end
+    return false
+end
+local function pressSkipRound()
+    local b=getSkipButton()
+    if not b then notify("Tombol Skip Round ga ketemu") return false end
+    local ok,how=pressButton(b)
+    if ok then notify("Skip Round ditekan ("..how..")")
+    else notify("Gagal nekan Skip Round") end
+    return ok
+end
+------------------------------------------------------------ FINISH DETECTION
+local function snapshotTower()
+    local f=sectionsFolder()
+    if not f then return nil end
+    local s={f}
+    for _,c in ipairs(f:GetChildren()) do s[#s+1]=c end
+    return s
+end
+local function towerAlive(s)
+    if not s then return false end
+    for _,i in ipairs(s) do if not i:IsDescendantOf(Workspace) then return false end end
+    return true
+end
+local setAuto
+local function markFinished(src)
+    st.finished=true
+    st.fSnap=snapshotTower()
+    if autoEnabled and not st.inComplete then
+        if cfg.autoOffWhenDone then
+            notify("Finish kedeteksi ("..src.."), Autonomous OFF")
+            setAuto(false)
+        else
+            st.roundDone=true
+            notify("Finish kedeteksi ("..src.."), nunggu round baru")
+        end
+    end
+end
+local hooked=setmetatable({},{__mode="k"})
+local function hookTouch(inst)
+    for _,p in ipairs(partsOf(inst)) do
+        if not hooked[p] then
+            hooked[p]=true
+            addConn(p.Touched:Connect(function(o)
+                local c=lp.Character
+                if c and o:IsDescendantOf(c) then
+                    st.touchAt=os.clock()
+                    if not st.finished then markFinished("touch") end
+                end
+            end))
+        end
+    end
+end
+task.spawn(function()
+    while not unloaded do
+        pcall(function()
+            hookTouch(getGlow())
+            hookTouch(getFinishPad())
+            if not st.finished and inFinishZone() then markFinished("zone") end
+            if st.finished and not towerAlive(st.fSnap) and #getSections(true)>0 then st.finished=false end
+        end)
+        task.wait(0.25)
+    end
+end)
+------------------------------------------------------------ AUTONOMOUS
+local autoLoop,resetRun
+local function waitLive(id,t,label)
+    local e=os.clock()+t
+    while os.clock()<e do
+        if not alive(id) then return false end
+        setStatus(("%s %ds"):format(label,math.ceil(e-os.clock())))
+        task.wait(0.1)
+    end
+    return alive(id)
+end
+local function waitChar(id)
+    local t=os.clock()+15
+    while alive(id) and os.clock()<t do
+        local h,r=hum(),hrp()
+        if h and r and h.Health>0 then task.wait(0.5) return true end
+        task.wait(0.2)
+    end
+    return false
+end
+local function walkAround(id,center,ext)
+    local mn,mxv=cfg.topWalkMin,math.max(cfg.topWalkMax,cfg.topWalkMin)
+    local t1=os.clock()+mn+math.random()*(mxv-mn)
+    while os.clock()<t1 do
+        if not alive(id) then return end
+        local h,r=hum(),hrp()
+        if not h or not r or h.Health<=0 then return end
+        setStatus(("WALK TOP %.0fs"):format(math.max(0,t1-os.clock())))
+        local flat=Vector3.new(r.Position.X-center.X,0,r.Position.Z-center.Z).Magnitude
+        if flat>ext+6 or r.Position.Y<center.Y-6 then placeAt(center) end
+        local ang,rad=math.random()*math.pi*2,math.random()*ext
+        h:MoveTo(Vector3.new(center.X+math.cos(ang)*rad,r.Position.Y,center.Z+math.sin(ang)*rad))
+        if math.random()<0.3 then h.Jump=true end
+        local w=os.clock()+0.8+math.random()*0.8
+        while os.clock()<w and os.clock()<t1 and alive(id) do task.wait(0.1) end
+    end
+    local h,r=hum(),hrp()
+    if h and r then h:MoveTo(r.Position) end
+end
+local function touchGlow(id)
+    for attempt=1,2 do
+        local g=getGlow()
+        if not g then notify("FinishGlow ga ketemu") return false end
+        local t0=os.clock()
+        local pos=glowTarget(g,attempt==2)
+        if not pos then return false end
+        setStatus("TOUCH GLOW"..(attempt==2 and " (2)" or ""))
+        local ok=goTo(pos,cfg.glowMove==2,cfg.autoSpeed,true)
+        if not alive(id) or not ok then return false end
+        local hold=os.clock()+cfg.finishHold
+        while os.clock()<hold do
+            if not alive(id) then return false end
+            local r=hrp()
+            if not r then return false end
+            if (r.Position-pos).Magnitude>6 then placeAt(pos) end
+            task.wait(0.1)
+        end
+        if st.touchAt>=t0 or inFinishZone() then return true end
+    end
+    return false
+end
+local function padRun(id)
+    if not getFinishPad() then notify("Finish pad ga ketemu") return false end
+    for _=1,2 do
+        local t0=os.clock()
+        local pos=getFinishTarget()
+        if not pos then return false end
+        setStatus("TO FINISH PAD")
+        local ok=flyTo(pos,cfg.autoSpeed,true)
+        if not alive(id) or not ok then return false end
+        local hold=os.clock()+cfg.finishHold
+        while os.clock()<hold do
+            if not alive(id) then return false end
+            local r=hrp()
+            if not r then return false end
+            local flat=Vector3.new(r.Position.X-pos.X,0,r.Position.Z-pos.Z).Magnitude
+            if flat>8 or r.Position.Y<pos.Y-8 then placeAt(pos) end
+            task.wait(0.1)
+        end
+        if st.touchAt>=t0 then return true end
+    end
+    return false
+end
+local function skipRoundFlow(id)
+    if not waitLive(id,cfg.skipDelay,"SKIP ROUND IN") then return false end
+    for attempt=1,2 do
+        setStatus("PRESS SKIP ROUND"..(attempt==2 and " (2)" or ""))
+        local pressed=pressSkipRound()
+        if not pressed then return false end
+        local e=os.clock()+6
+        while os.clock()<e do
+            if not alive(id) then return false end
+            if st.fSnap and not towerAlive(st.fSnap) then return true end
+            setStatus(("WAIT SKIP %ds"):format(math.ceil(e-os.clock())))
+            task.wait(0.2)
+        end
+    end
+    return false
+end
+local function completeRoundInner(id)
+    if not hum() or not hrp() then return nil end
+    local pos,ext=getStepsTarget()
+    if pos then
+        setStatus("TO FINISH STEPS")
+        local ok=goTo(pos,cfg.stepsMove==2,cfg.autoSpeed,true)
+        if not alive(id) then return nil end
+        local h=hum()
+        if not ok or not h or h.Health<=0 then st.needResume=true return nil end
+        walkAround(id,pos,ext)
+        if not alive(id) then return nil end
+    else
+        notify("Finish steps ga ketemu, lanjut ke finish")
+    end
+    local orders={{"glow"},{"pad"},{"glow","pad"},{"pad","glow"}}
+    local touched=false
+    for _,m in ipairs(orders[cfg.finishMode] or orders[1]) do
+        local ok=(m=="glow") and touchGlow(id) or (m=="pad" and padRun(id))
+        if not alive(id) then return nil end
+        local h=hum()
+        if not h or h.Health<=0 then st.needResume=true return nil end
+        if ok then touched=true break end
+    end
+    if touched then notify("Finish kesentuh")
+    else notify("Finish belum kedeteksi kesentuh, round tetap dianggap selesai") end
+    if cfg.autoSkip and touched then
+        markFinished("round")
+        skipRoundFlow(id)
+        if not alive(id) then return nil end
+    else
+        if cfg.autoSkip and not touched then notify("Skip Round dibatalin: finish belum kesentuh") end
+        if cfg.finishReturn and pos then
+            setStatus("RETURN")
+            goTo(pos,cfg.stepsMove==2,cfg.autoSpeed,true)
+        end
+        markFinished("round")
+    end
+    return "done"
+end
+local function completeRound(id)
+    st.inComplete=true
+    local ok,res=pcall(completeRoundInner,id)
+    st.inComplete=false
+    if not alive(id) then return end
+    if not ok then warn("[STP] "..tostring(res)) notify("Error finish: "..tostring(res)) task.wait(2) return end
+    if res=="done" then
+        if cfg.autoOffWhenDone then
+            notify("Selesai, Autonomous OFF")
+            setAuto(false)
+        else
+            st.roundDone=true
+            setStatus("WAITING FOR NEW ROUND")
+            notify("Selesai, nunggu round baru")
+        end
+    end
+end
+local function autoCycle(id)
+    local list=getSections(true)
+    if st.roundDone then
+        setStatus("WAITING FOR NEW ROUND")
+        if st.fSnap and towerAlive(st.fSnap) then task.wait(0.5) return end
+        if #list==0 then task.wait(0.5) return end
+        st.roundDone=false st.finished=false st.progress=0 st.deaths={} st.rSnap=nil st.needInit=false
+        notify("Round baru kedeteksi")
+        waitLive(id,cfg.newRoundDelay,"NEW ROUND IN")
+        return
+    end
+    if st.finished and towerAlive(st.fSnap) then st.roundDone=true return end
+    if #list==0 then setStatus("NO TOWER") task.wait(1) return end
+    local h,r=hum(),hrp()
+    if not h or not r or h.Health<=0 then setStatus("WAIT CHARACTER") waitChar(id) return end
+    if not st.rSnap then st.rSnap=snapshotTower()
+    elseif not towerAlive(st.rSnap) then
+        st.rSnap=snapshotTower() st.progress=0 st.needInit=false
+        notify("Round baru, mulai dari stage 1")
+    end
+    if st.needInit then
+        st.needInit=false
+        local idx,d=currentIndex()
+        if idx and d<=25 then st.progress=math.max(0,idx-1) end
+    end
+    local total=#list
+    if st.progress>total then st.progress=total end
+    local n=st.progress+1
+    if n>total then
+        setStatus("FINISH SEQUENCE")
+        completeRound(id)
+        return
+    end
+    local sec=list[n]
+    local part=(cfg.autoTarget==2) and sec.stop or sec.start
+    setStatus(("CLIMB %d/%d"):format(n,total))
+    local ok=goTo(standPos(part),cfg.autoMethod==1,cfg.autoSpeed,true)
+    if not alive(id) then return end
+    if not ok then
+        if not cfg.resumeAfterDeath then st.progress=0 end
+        st.needResume=true
+        setStatus("RESPAWNED")
+        waitChar(id)
+        return
+    end
+    st.progress=n
+    if n<total then
+        local d=cfg.autoDelayMin+math.random()*math.max(0,cfg.autoDelayMax-cfg.autoDelayMin)
+        waitLive(id,d,"NEXT STAGE IN")
+    end
+end
+function autoLoop(id,delay)
+    if delay and delay>0 then
+        if not waitLive(id,delay,"RESYNC IN") then return end
+    end
+    if st.finished and towerAlive(st.fSnap) then
+        st.roundDone=true
+        notify("Udah finish, nunggu round baru")
+    end
+    while alive(id) do
+        local ok,err=pcall(autoCycle,id)
+        if not ok then warn("[STP] "..tostring(err)) task.wait(1) end
+        task.wait(0.1)
+    end
+end
+function resetRun(reason)
+    runId+=1
+    local id=runId
+    st.deaths={} st.inComplete=false st.roundDone=false st.rSnap=nil
+    st.needResume=false st.needInit=false st.progress=0
+    cancelFlight()
+    setStatus("RESYNC")
+    notify("Desync Guard: restart dari stage 1 ("..reason..")")
+    task.spawn(autoLoop,id,cfg.syncDelay)
+end
+function setAuto(on)
+    if on==autoEnabled then return end
+    autoEnabled=on
+    runId+=1
+    st.deaths={}
+    if on then
+        st.progress=0 st.needInit=true st.roundDone=false st.rSnap=nil st.needResume=false
+        syncAnti()
+        task.spawn(autoLoop,runId,0)
+        notify("Autonomous ON")
+    else
+        cancelFlight()
+        setStatus("IDLE")
+        syncAnti()
+        notify("Autonomous OFF")
+    end
+    refreshUI()
+end
+addConn(lp.CharacterAdded:Connect(function(c)
+    if antiOn then task.spawn(applyGod,c) end
+    if not autoEnabled then return end
+    if not cfg.resumeAfterDeath then st.progress=0 end
+    if not cfg.syncGuard then return end
+    local now=os.clock()
+    local fresh={}
+    for _,t in ipairs(st.deaths) do if now-t<=cfg.syncWindow then fresh[#fresh+1]=t end end
+    fresh[#fresh+1]=now
+    st.deaths=fresh
+    if #fresh>=cfg.syncDeaths then resetRun(("%d respawn / %ds"):format(#fresh,cfg.syncWindow)) end
+end))
+------------------------------------------------------------ MANUAL ACTIONS
+local function manualStage(next,useStop)
+    local list=getSections(true)
+    local idx=currentIndex() or 0
+    local n=next and idx+1 or idx
+    if n<1 then n=1 end
+    if n>#list then notify("Udah stage terakhir") return end
+    local part=useStop and list[n].stop or list[n].start
+    goTo(standPos(part),cfg.tpMode==2,cfg.flySpeed,true)
+end
+local function manualSteps()
+    local p=getStepsTarget()
+    if not p then notify("Finish steps ga ketemu") return end
+    goTo(p,cfg.tpMode==2,cfg.flySpeed,true)
+end
+local function manualGlow()
+    local g=getGlow()
+    if not g then notify("FinishGlow ga ketemu") return end
+    local p=glowTarget(g)
+    if p then goTo(p,cfg.tpMode==2,cfg.flySpeed,true) end
+end
+local function manualPad()
+    local p=getFinishTarget()
+    if not p then notify("Finish pad ga ketemu") return end
+    goTo(p,cfg.tpMode==2,cfg.flySpeed,true)
+end
+local function manualLobby()
+    local p=lobbyPos()
+    if not p then notify("Lobby ga ketemu") return end
+    goTo(p,cfg.tpMode==2,cfg.flySpeed,true)
+end
+------------------------------------------------------------ UI  (v18 mobile friendly glass dashboard)
+-- seluruh UI dibungkus fungsi supaya nggak kena limit local register
+local gui
+local function buildUI()
+    local HEAD=Enum.Font.RobotoMono
+    local BODY=Enum.Font.GothamMedium
+    local BOLD=Enum.Font.GothamBold
+    local TOUCH=UIS.TouchEnabled and not UIS.KeyboardEnabled
+    local function acc() return ACCENTS[cfg.accentIndex].c end
+    local function accDim() return acc():Lerp(Color3.fromRGB(14,16,34),0.55) end
+    local function accSoft() return acc():Lerp(Color3.new(1,1,1),0.35) end
+    local function rgbStr(c)
+        return ("rgb(%d,%d,%d)"):format(math.floor(c.R*255+0.5),math.floor(c.G*255+0.5),math.floor(c.B*255+0.5))
+    end
+    local TXT=Color3.fromRGB(236,238,252)
+    local SUB=Color3.fromRGB(128,136,172)
+    local OFFC=Color3.fromRGB(38,43,76)
+    local DIM=Color3.fromRGB(36,41,72)
+    local CARD_A=Color3.fromRGB(32,36,68)
+    local CARD_B=Color3.fromRGB(15,17,34)
+    local LINE=Color3.fromRGB(74,82,136)
+    local function mk(class,props,parent)
+        local o=Instance.new(class)
+        for k,v in pairs(props) do o[k]=v end
+        if parent then o.Parent=parent end
+        return o
+    end
+    local function corner(o,r) return mk("UICorner",{CornerRadius=UDim.new(0,r)},o) end
+    local function stroke(o,col,th,tr)
+        return mk("UIStroke",{Color=col,Thickness=th or 1,Transparency=tr or 0,ApplyStrokeMode=Enum.ApplyStrokeMode.Border},o)
+    end
+    local function glass(f,r,a,b)
+        corner(f,r or 10)
+        mk("UIGradient",{Color=ColorSequence.new(a or CARD_A,b or CARD_B),Rotation=90},f)
+        return stroke(f,LINE,1,0.55)
+    end
+    local function label(parent,text,pos,size,ts,col,font,xa)
+        return mk("TextLabel",{Text=text,Position=pos,Size=size,TextSize=ts or 12,TextColor3=col or TXT,
+            Font=font or BODY,BackgroundTransparency=1,
+            TextXAlignment=xa or Enum.TextXAlignment.Left},parent)
+    end
+    gui=mk("ScreenGui",{Name="StageTeleporterV18",ResetOnSpawn=false,IgnoreGuiInset=true,
+        ZIndexBehavior=Enum.ZIndexBehavior.Sibling,DisplayOrder=999})
+    pcall(function() gui.Parent=(gethui and gethui()) or game:GetService("CoreGui") end)
+    if not gui.Parent then gui.Parent=lp:WaitForChild("PlayerGui") end
+    local refs={}
+    local function addRef(f) refs[#refs+1]=f f() end
+    function refreshUI() for _,f in ipairs(refs) do pcall(f) end end
+    local relayout -- diisi di akhir
+    ---------------------------------------------------- layout constants
+    local W=680
+    local H_FULL,H_COMPACT=460,380
+    local H=H_FULL
+    local SB=160
+    local CW=W-SB
+    local PAD=18
+    local GW=CW-PAD*2
+    local CELLW=math.floor((GW-8-8)/2)
+    local ROWH=TOUCH and 46 or 40
+    local BTN=TOUCH and 34 or 30
+    local BARH=TOUCH and 34 or 30
+    local PH=TOUCH and 34 or 28
+    local MINI_W,MINI_H=360,(TOUCH and 50 or 46)
+    local SCROLL_Y=270
+    local winW,winH=W,H
+    local minimized=false
+    local compact=false
+    local cam=Workspace.CurrentCamera
+    local function viewport()
+        local vp=gui.AbsoluteSize
+        if vp.X<100 or vp.Y<100 then vp=cam and cam.ViewportSize or Vector2.new(1280,720) end
+        if vp.X<100 or vp.Y<100 then vp=Vector2.new(1280,720) end
+        return vp
+    end
+    local function wantCompact()
+        local m=cfg.layoutMode
+        if m==2 then return true elseif m==3 then return false end
+        return viewport().Y<600
+    end
+    compact=wantCompact()
+    H=compact and H_COMPACT or H_FULL
+    winH=H
+    local function computeScale()
+        local vp=viewport()
+        local fit=math.min((vp.X-16)/W,(vp.Y-16)/H)
+        local o=UI_SCALES[cfg.uiScaleMode]
+        local s
+        if o and o.m then s=math.min(o.m,fit) else s=math.min(fit,1) end
+        return math.clamp(s,0.3,1.5)
+    end
+    ---------------------------------------------------- window
+    local scaleInit=computeScale()
+    local root=mk("Frame",{Name="Root",Size=UDim2.fromOffset(W*scaleInit,H*scaleInit),
+        BackgroundTransparency=1,BorderSizePixel=0},gui)
+    local main=mk("Frame",{Name="Main",Size=UDim2.fromOffset(W,H),BackgroundColor3=Color3.new(1,1,1),BorderSizePixel=0,Active=true},root)
+    local mainCorner=corner(main,22)
+    mk("UIGradient",{Color=ColorSequence.new({
+        ColorSequenceKeypoint.new(0,Color3.fromRGB(44,50,92)),
+        ColorSequenceKeypoint.new(0.35,Color3.fromRGB(14,17,36)),
+        ColorSequenceKeypoint.new(1,Color3.fromRGB(8,9,21)),
+    }),Rotation=135},main)
+    local mainStroke=stroke(main,LINE,1.3,0.45)
+    local uiScale=mk("UIScale",{Scale=scaleInit},main)
+    local function clampPos(x,y)
+        local vp=viewport()
+        local s=uiScale.Scale
+        return math.clamp(x,0,math.max(0,vp.X-winW*s)),math.clamp(y,0,math.max(0,vp.Y-winH*s))
+    end
+    do
+        local vp=viewport()
+        local s=uiScale.Scale
+        local x,y
+        if cfg.uiX>=0 and cfg.uiY>=0 then x,y=clampPos(cfg.uiX,cfg.uiY)
+        else x,y=clampPos((vp.X-W*s)/2,(vp.Y-H*s)/2) end
+        root.Position=UDim2.fromOffset(x,y)
+    end
+    addRef(function()
+        mainStroke.Color=acc():Lerp(LINE,0.6)
+        main.BackgroundTransparency=cfg.transparency
+    end)
+    ---------------------------------------------------- drag (window)
+    local dragging,dragStart,startPos=false
+    local function makeDrag(handle)
+        handle.InputBegan:Connect(function(i)
+            if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
+                dragging=true dragStart=i.Position startPos=root.Position
+                i.Changed:Connect(function()
+                    if i.UserInputState==Enum.UserInputState.End then
+                        dragging=false
+                        local x,y=clampPos(root.Position.X.Offset,root.Position.Y.Offset)
+                        root.Position=UDim2.fromOffset(x,y)
+                        cfg.uiX,cfg.uiY=x,y
+                        saveCfg()
+                    end
+                end)
+            end
+        end)
+    end
+    addConn(UIS.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then
+            local d=i.Position-dragStart
+            root.Position=UDim2.fromOffset(startPos.X.Offset+d.X,startPos.Y.Offset+d.Y)
+        end
+    end))
+    local function drawLogo(parent,x,y,s)
+        local a=mk("Frame",{Size=UDim2.fromOffset(s,s),Position=UDim2.fromOffset(x,y),Rotation=45,
+            BackgroundColor3=Color3.new(1,1,1),BorderSizePixel=0},parent)
+        corner(a,3)
+        mk("UIGradient",{Color=ColorSequence.new(Color3.fromRGB(240,242,255),Color3.fromRGB(120,128,180)),Rotation=90},a)
+        local b=mk("Frame",{Size=UDim2.fromOffset(s,s),Position=UDim2.fromOffset(x+s*0.55,y),Rotation=45,
+            BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=0.35,BorderSizePixel=0},parent)
+        corner(b,3)
+        mk("UIGradient",{Color=ColorSequence.new(Color3.fromRGB(190,196,235),Color3.fromRGB(70,78,130)),Rotation=90},b)
+    end
+    ---------------------------------------------------- floating toggle button (FAB)
+    local FABS=TOUCH and 50 or 42
+    local fab=mk("Frame",{Name="Toggle",Size=UDim2.fromOffset(FABS,FABS),BackgroundColor3=Color3.new(1,1,1),
+        BackgroundTransparency=0.05,BorderSizePixel=0,ZIndex=20,Active=true},gui)
+    corner(fab,FABS/2)
+    mk("UIGradient",{Color=ColorSequence.new(Color3.fromRGB(44,50,92),Color3.fromRGB(10,12,26)),Rotation=135},fab)
+    local fabStroke=stroke(fab,LINE,1.6,0.15)
+    drawLogo(fab,FABS/2-10.85,FABS/2-7,14)
+    local fabDot=mk("Frame",{Size=UDim2.fromOffset(11,11),Position=UDim2.new(1,-13,0,1),BackgroundColor3=DIM,BorderSizePixel=0,ZIndex=3},fab)
+    corner(fabDot,6)
+    stroke(fabDot,Color3.fromRGB(10,12,26),1.5,0)
+    local fabHit=mk("TextButton",{Text="",BackgroundTransparency=1,AutoButtonColor=false,Size=UDim2.fromScale(1,1),ZIndex=5},fab)
+    local function clampFab(x,y)
+        local vp=viewport()
+        return math.clamp(x,0,math.max(0,vp.X-FABS)),math.clamp(y,0,math.max(0,vp.Y-FABS))
+    end
+    local function fabDefault()
+        local vp=viewport()
+        return clampFab(vp.X-FABS-14,vp.Y*0.35)
+    end
+    do
+        local x,y
+        if cfg.fabX>=0 and cfg.fabY>=0 then x,y=clampFab(cfg.fabX,cfg.fabY) else x,y=fabDefault() end
+        fab.Position=UDim2.fromOffset(x,y)
+    end
+    local function updateFab()
+        local m=cfg.floatBtn
+        fab.Visible=(m==2) or (m==1 and TOUCH) or (not root.Visible and not UIS.KeyboardEnabled)
+    end
+    local function setVisible(v)
+        root.Visible=v
+        updateFab()
+        if v and relayout then relayout() end
+    end
+    local fabDrag,fabMoved,fabStart,fabOrig=false,false,nil,nil
+    fabHit.InputBegan:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
+            fabDrag=true fabMoved=false fabStart=i.Position fabOrig=fab.Position
+            i.Changed:Connect(function()
+                if i.UserInputState==Enum.UserInputState.End then
+                    fabDrag=false
+                    if fabMoved then
+                        local x,y=clampFab(fab.Position.X.Offset,fab.Position.Y.Offset)
+                        fab.Position=UDim2.fromOffset(x,y)
+                        cfg.fabX,cfg.fabY=x,y
+                        saveCfg()
+                    else
+                        setVisible(not root.Visible)
+                    end
+                end
+            end)
+        end
+    end)
+    addConn(UIS.InputChanged:Connect(function(i)
+        if fabDrag and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then
+            local d=i.Position-fabStart
+            if fabMoved or d.Magnitude>8 then
+                fabMoved=true
+                fab.Position=UDim2.fromOffset(fabOrig.X.Offset+d.X,fabOrig.Y.Offset+d.Y)
+            end
+        end
+    end))
+    -- hotkey buat keyboard
+    addConn(UIS.InputBegan:Connect(function(i,gp)
+        if gp then return end
+        local kc=Enum.KeyCode[MENU_KEYS[cfg.menuKey]]
+        if kc and i.KeyCode==kc then setVisible(not root.Visible) end
+    end))
+    ---------------------------------------------------- icons
+    -- icon digambar pakai Frame (nggak bergantung font). return fungsi paint(color)
+    local function makeIcon(parent,kind,x,y)
+        local h=mk("Frame",{Size=UDim2.fromOffset(18,18),Position=UDim2.fromOffset(x,y),BackgroundTransparency=1},parent)
+        local fills,strokes={},{}
+        local function fillF(px,py,sx,sy,r)
+            local f=mk("Frame",{Position=UDim2.fromOffset(px,py),Size=UDim2.fromOffset(sx,sy),BackgroundColor3=SUB,BorderSizePixel=0},h)
+            corner(f,r)
+            fills[#fills+1]=f
+            return f
+        end
+        local function ringF(px,py,sx,sy,r,rot)
+            local f=mk("Frame",{Position=UDim2.fromOffset(px,py),Size=UDim2.fromOffset(sx,sy),Rotation=rot or 0,
+                BackgroundTransparency=1,BorderSizePixel=0},h)
+            corner(f,r)
+            strokes[#strokes+1]=stroke(f,SUB,1.5,0)
+        end
+        if kind=="teleport" then
+            ringF(4,4,10,10,2,45)
+            fillF(7,7,4,4,2)
+        elseif kind=="auto" then
+            ringF(2,2,14,14,7)
+            fillF(7,7,4,4,2)
+        else
+            local kx={10,3,11}
+            for k=1,3 do
+                fillF(2,2+(k-1)*6,14,2,1)
+                fillF(kx[k],1+(k-1)*6,4,4,2)
+            end
+        end
+        return function(c)
+            for _,f in ipairs(fills) do f.BackgroundColor3=c end
+            for _,s in ipairs(strokes) do s.Color=c end
+        end
+    end
+    local function pill(parent,text,pos,size,primary)
+        local b=mk("TextButton",{Text=text,Font=BOLD,TextSize=11,TextColor3=TXT,AutoButtonColor=true,BorderSizePixel=0,
+            BackgroundColor3=primary and accDim() or Color3.fromRGB(20,24,48),Position=pos,Size=size},parent)
+        corner(b,size.Y.Offset/2)
+        stroke(b,LINE,1,0.5)
+        return b
+    end
+    ---------------------------------------------------- containers
+    local sidebar=mk("Frame",{Name="Sidebar",Size=UDim2.fromOffset(SB,H),BackgroundTransparency=1},main)
+    local content=mk("Frame",{Name="Content",Position=UDim2.fromOffset(SB,0),Size=UDim2.fromOffset(CW,H),BackgroundTransparency=1},main)
+    local divider=mk("Frame",{Position=UDim2.fromOffset(SB-1,56),Size=UDim2.fromOffset(1,H-112),BackgroundColor3=LINE,BackgroundTransparency=0.6,BorderSizePixel=0},main)
+    -- mini bar (minimized state)
+    local mini=mk("Frame",{Name="Mini",Size=UDim2.fromOffset(MINI_W,MINI_H),BackgroundTransparency=1,Visible=false,Active=true},main)
+    drawLogo(mini,16,math.floor((MINI_H-13)/2),13)
+    label(mini,"StageTP",UDim2.fromOffset(46,0),UDim2.fromOffset(70,MINI_H),14,TXT,HEAD)
+    local miniStatus=label(mini,"IDLE",UDim2.fromOffset(116,0),UDim2.fromOffset(MINI_W-116-BTN-8-8-72-6,MINI_H),10,SUB,HEAD)
+    miniStatus.TextTruncate=Enum.TextTruncate.AtEnd
+    local miniExpand=mk("TextButton",{Text="»",Font=BOLD,TextSize=16,TextColor3=TXT,AutoButtonColor=true,
+        BackgroundColor3=Color3.fromRGB(24,28,54),Size=UDim2.fromOffset(BTN,BTN),
+        Position=UDim2.fromOffset(MINI_W-BTN-8,math.floor((MINI_H-BTN)/2))},mini)
+    corner(miniExpand,BTN/2) stroke(miniExpand,LINE,1,0.5)
+    local miniAuto=pill(mini,"START",UDim2.fromOffset(MINI_W-BTN-8-8-72,math.floor((MINI_H-(BTN-4))/2)),UDim2.fromOffset(72,BTN-4),true)
+    miniAuto.MouseButton1Click:Connect(function() setAuto(not autoEnabled) end)
+    makeDrag(mini)
+    -- sidebar: logo
+    local logoWrap=mk("Frame",{Size=UDim2.fromOffset(SB,56),BackgroundTransparency=1,Active=true},sidebar)
+    drawLogo(logoWrap,22,21,14)
+    label(logoWrap,"StageTP",UDim2.fromOffset(54,0),UDim2.fromOffset(100,56),15,TXT,HEAD)
+    makeDrag(logoWrap)
+    -- content: top bar
+    local topbar=mk("Frame",{Size=UDim2.fromOffset(CW,44),BackgroundTransparency=1,Active=true},content)
+    makeDrag(topbar)
+    local collapseBtn=mk("TextButton",{Text="«",Font=BOLD,TextSize=16,TextColor3=TXT,AutoButtonColor=true,
+        BackgroundColor3=Color3.fromRGB(24,28,54),Size=UDim2.fromOffset(BTN,BTN),
+        Position=UDim2.fromOffset(PAD,math.floor((44-BTN)/2))},topbar)
+    corner(collapseBtn,BTN/2) stroke(collapseBtn,LINE,1,0.5)
+    local hideW=TOUCH and 76 or 140
+    local pillY=math.floor((44-PH)/2)
+    local stopBtn=pill(topbar,"Stop All",UDim2.fromOffset(CW-PAD-84,pillY),UDim2.fromOffset(84,PH),true)
+    local hideBtn=pill(topbar,"Hide",UDim2.fromOffset(CW-PAD-84-8-hideW,pillY),UDim2.fromOffset(hideW,PH),false)
+    addRef(function()
+        stopBtn.BackgroundColor3=accDim()
+        hideBtn.Text=TOUCH and "Hide" or ("Hide · "..MENU_KEYS[cfg.menuKey])
+        miniAuto.Text=autoEnabled and "STOP" or "START"
+        miniAuto.BackgroundColor3=autoEnabled and acc():Lerp(Color3.fromRGB(14,16,34),0.3) or accDim()
+    end)
+    hideBtn.MouseButton1Click:Connect(function()
+        setVisible(false)
+        if fab.Visible then notify("UI disembunyiin, tap tombol floating buat buka lagi")
+        else notify("UI disembunyiin, tekan "..MENU_KEYS[cfg.menuKey].." buat buka lagi") end
+    end)
+    stopBtn.MouseButton1Click:Connect(function()
+        setAuto(false)
+        cancelFlight()
+        notify("Semua dihentikan")
+    end)
+    collapseBtn.MouseButton1Click:Connect(function() minimized=true relayout() end)
+    miniExpand.MouseButton1Click:Connect(function() minimized=false relayout() end)
+    -- title
+    local titleLbl=mk("TextLabel",{Position=UDim2.fromOffset(PAD,42),Size=UDim2.fromOffset(GW,36),BackgroundTransparency=1,
+        Font=HEAD,TextSize=26,TextColor3=TXT,RichText=true,Text="",TextXAlignment=Enum.TextXAlignment.Left},content)
+    ---------------------------------------------------- dashboard (disembunyiin di compact)
+    local dash=mk("Frame",{Name="Dash",Size=UDim2.fromScale(1,1),BackgroundTransparency=1,BorderSizePixel=0},content)
+    local CARD_Y,CARD_H=120,62
+    local cardW=math.floor((GW-3*8)/4)
+    local function statCard(i,title)
+        local f=mk("Frame",{Position=UDim2.fromOffset(PAD+(i-1)*(cardW+8),CARD_Y),Size=UDim2.fromOffset(cardW,CARD_H),
+            BackgroundColor3=Color3.new(1,1,1),BorderSizePixel=0},dash)
+        glass(f,12)
+        label(f,title,UDim2.fromOffset(10,7),UDim2.new(1,-20,0,12),10,SUB)
+        local v=label(f,"-",UDim2.fromOffset(10,20),UDim2.new(1,-52,0,26),19,TXT,HEAD)
+        local c=label(f,"",UDim2.fromOffset(10,46),UDim2.new(1,-20,0,12),9,SUB)
+        c.TextTruncate=Enum.TextTruncate.AtEnd
+        local g=mk("Frame",{BackgroundTransparency=1,Position=UDim2.new(1,-38,0,10),Size=UDim2.fromOffset(28,34)},f)
+        return v,c,g
+    end
+    local vStage,cStage,gStage=statCard(1,"STAGE")
+    local vLeft,cLeft,gLeft=statCard(2,"LEFT")
+    local vAuto,cAuto,gAuto=statCard(3,"AUTO")
+    local vAnti,cAnti,gAnti=statCard(4,"ANTI-KILL")
+    local g1={}
+    do
+        local pat={0.45,0.7,0.55,0.95,0.65}
+        for k=1,5 do
+            g1[k]=mk("Frame",{AnchorPoint=Vector2.new(0,1),Position=UDim2.new(0,(k-1)*6,1,0),Size=UDim2.new(0,4,pat[k],0),
+                BackgroundColor3=DIM,BorderSizePixel=0},gStage)
+            corner(g1[k],2)
+        end
+    end
+    local g2={}
+    for k=0,11 do
+        local r,c=math.floor(k/3),k%3
+        g2[k+1]=mk("Frame",{Position=UDim2.fromOffset(c*10,r*9),Size=UDim2.fromOffset(6,6),BackgroundColor3=DIM,BorderSizePixel=0},gLeft)
+        corner(g2[k+1],3)
+    end
+    local g3={}
+    for k=1,7 do
+        g3[k]=mk("Frame",{AnchorPoint=Vector2.new(0,0.5),Position=UDim2.new(0,(k-1)*4,0.5,0),Size=UDim2.new(0,2,0.2,0),
+            BackgroundColor3=DIM,BorderSizePixel=0},gAuto)
+        corner(g3[k],1)
+    end
+    local ringF=mk("Frame",{Position=UDim2.fromOffset(1,4),Size=UDim2.fromOffset(26,26),BackgroundTransparency=1},gAnti)
+    corner(ringF,13)
+    local ringS=stroke(ringF,DIM,3,0)
+    local ringDot=mk("Frame",{AnchorPoint=Vector2.new(0.5,0.5),Position=UDim2.fromScale(0.5,0.5),Size=UDim2.fromOffset(6,6),
+        BackgroundColor3=DIM,BorderSizePixel=0},ringF)
+    corner(ringDot,3)
+    local PROG_Y=190
+    local progTitle=mk("TextLabel",{Position=UDim2.fromOffset(PAD,PROG_Y),Size=UDim2.fromOffset(190,20),BackgroundTransparency=1,
+        Font=HEAD,TextSize=15,TextColor3=TXT,RichText=true,Text="",TextXAlignment=Enum.TextXAlignment.Left},dash)
+    addRef(function()
+        progTitle.Text='Stage <font color="'..rgbStr(accSoft())..'">Progress</font>'
+    end)
+    local function chip(x)
+        local f=mk("Frame",{Position=UDim2.fromOffset(x,PROG_Y),Size=UDim2.fromOffset(122,20),BackgroundColor3=Color3.fromRGB(16,19,40),BorderSizePixel=0},dash)
+        corner(f,10) stroke(f,LINE,1,0.55)
+        local t=label(f,"-",UDim2.fromOffset(10,0),UDim2.new(1,-18,1,0),10,TXT,HEAD,Enum.TextXAlignment.Center)
+        t.TextTruncate=Enum.TextTruncate.AtEnd
+        return t
+    end
+    local chipNext=chip(CW-PAD-122)
+    local chipNow=chip(CW-PAD-122-8-122)
+    local barsFrame=mk("Frame",{Position=UDim2.fromOffset(PAD,PROG_Y+26),Size=UDim2.fromOffset(GW,42),BackgroundTransparency=1},dash)
+    mk("Frame",{Position=UDim2.fromOffset(PAD,PROG_Y+69),Size=UDim2.fromOffset(GW,1),BackgroundColor3=LINE,BackgroundTransparency=0.5,BorderSizePixel=0},dash)
+    local marker=mk("Frame",{AnchorPoint=Vector2.new(0.5,0.5),Size=UDim2.fromOffset(9,9),BackgroundColor3=Color3.new(1,1,1),
+        BorderSizePixel=0,Visible=false,ZIndex=5},barsFrame)
+    corner(marker,5)
+    local markerStroke=stroke(marker,acc(),2,0)
+    local bars,barCount,barH={},-1,{}
+    local function rebuildBars(n)
+        for _,b in ipairs(bars) do b:Destroy() end
+        bars,barH={},{}
+        for i=1,n do
+            local h=0.28+0.72*(i/n)
+            barH[i]=h
+            local b=mk("Frame",{AnchorPoint=Vector2.new(0,1),Position=UDim2.new((i-1)/n,0,1,0),Size=UDim2.new(1/n,-3,h,0),
+                BackgroundColor3=DIM,BorderSizePixel=0},barsFrame)
+            corner(b,3)
+            bars[i]=b
+        end
+        barCount=n
+    end
+    ---------------------------------------------------- pages
+    local pages={}
+    local curPage=1
+    local function newPage(name,icon,ta,tb,subNames)
+        local pg={name=name,icon=icon,ta=ta,tb=tb,subs={},cur=1}
+        local n=#subNames
+        pg.bar=mk("Frame",{Position=UDim2.fromOffset(PAD,82),Size=UDim2.fromOffset(n*78+8,BARH),BackgroundColor3=Color3.fromRGB(14,17,34),
+            BorderSizePixel=0,Visible=false},content)
+        corner(pg.bar,BARH/2) stroke(pg.bar,LINE,1,0.6)
+        for j,sn in ipairs(subNames) do
+            local b=mk("TextButton",{Text=sn,Font=BOLD,TextSize=10,AutoButtonColor=false,BorderSizePixel=0,
+                Position=UDim2.fromOffset(4+(j-1)*78,3),Size=UDim2.fromOffset(78,BARH-6),BackgroundColor3=DIM,TextColor3=SUB},pg.bar)
+            corner(b,(BARH-6)/2)
+            local sf=mk("ScrollingFrame",{Position=UDim2.fromOffset(PAD,SCROLL_Y),Size=UDim2.fromOffset(GW,H-SCROLL_Y-14),
+                BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=TOUCH and 5 or 3,ScrollBarImageColor3=acc(),
+                CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,
+                ScrollingDirection=Enum.ScrollingDirection.Y,Visible=false},content)
+            mk("UIGridLayout",{CellSize=UDim2.fromOffset(CELLW,ROWH),CellPadding=UDim2.fromOffset(8,8),
+                SortOrder=Enum.SortOrder.LayoutOrder},sf)
+            pg.subs[j]={frame=sf,btn=b,order=0}
+            b.MouseButton1Click:Connect(function()
+                pg.cur=j
+                sf.CanvasPosition=Vector2.zero
+                refreshUI()
+            end)
+        end
+        pages[#pages+1]=pg
+        return pg
+    end
+    local P1=newPage("TELEPORT","teleport","Quick ","Teleport",{"STAGES","FINISH"})
+    local P2=newPage("AUTO","auto","Auto ","Pilot",{"CORE","FINISH","ROUND","GUARD"})
+    local P3=newPage("SETTINGS","settings","Control ","Settings",{"GENERAL","LOOK","CONFIG"})
+    -- nav
+    label(sidebar,"MENU",UDim2.fromOffset(24,70),UDim2.fromOffset(100,14),9,SUB,BOLD)
+    local indicator=mk("Frame",{Position=UDim2.fromOffset(SB-3,100),Size=UDim2.fromOffset(2,18),BackgroundColor3=Color3.new(1,1,1),BorderSizePixel=0},sidebar)
+    corner(indicator,1)
+    local NAVH=TOUCH and 36 or 34
+    local navBtns={}
+    for i,pg in ipairs(pages) do
+        local b=mk("TextButton",{Text="",AutoButtonColor=false,BackgroundColor3=DIM,BackgroundTransparency=1,BorderSizePixel=0,
+            Position=UDim2.fromOffset(12,92+(i-1)*40),Size=UDim2.fromOffset(SB-26,NAVH)},sidebar)
+        corner(b,10)
+        local paint=makeIcon(b,pg.icon,11,math.floor((NAVH-18)/2))
+        local tx=label(b,pg.name:sub(1,1)..pg.name:sub(2):lower(),UDim2.fromOffset(38,0),UDim2.new(1,-44,1,0),12,SUB,BODY)
+        navBtns[i]={btn=b,paint=paint,tx=tx}
+        b.MouseButton1Click:Connect(function() curPage=i refreshUI() end)
+    end
+    -- sidebar: live status + autonomous button
+    local statusCardY=H-56-10-78
+    local statusHdr=label(sidebar,"LIVE STATUS",UDim2.fromOffset(24,statusCardY-18),UDim2.fromOffset(100,14),9,SUB,BOLD)
+    local statusCard=mk("Frame",{Position=UDim2.fromOffset(12,statusCardY),Size=UDim2.fromOffset(SB-26,78),BackgroundColor3=Color3.new(1,1,1),BorderSizePixel=0},sidebar)
+    glass(statusCard,12)
+    local statusLbl=label(statusCard,"IDLE",UDim2.fromOffset(10,8),UDim2.new(1,-20,0,34),11,acc(),HEAD)
+    statusLbl.TextWrapped=true statusLbl.TextYAlignment=Enum.TextYAlignment.Top
+    local guardChipF=mk("Frame",{Position=UDim2.fromOffset(10,48),Size=UDim2.new(1,-20,0,22),BackgroundColor3=Color3.fromRGB(12,14,30),BorderSizePixel=0},statusCard)
+    corner(guardChipF,11) stroke(guardChipF,LINE,1,0.6)
+    local guardChip=label(guardChipF,"GUARD IDLE",UDim2.fromOffset(0,0),UDim2.fromScale(1,1),10,SUB,HEAD,Enum.TextXAlignment.Center)
+    -- tombol autonomous: gradient di frame background terpisah (UIGradient di TextButton ikut mewarnai teks)
+    local autoWrap=mk("Frame",{Position=UDim2.fromOffset(12,H-56),Size=UDim2.fromOffset(SB-26,38),
+        BackgroundColor3=Color3.new(1,1,1),BorderSizePixel=0},sidebar)
+    corner(autoWrap,19)
+    local autoGrad=mk("UIGradient",{Color=ColorSequence.new(accDim(),Color3.fromRGB(16,19,40)),Rotation=0},autoWrap)
+    local autoStroke=stroke(autoWrap,acc(),1,0.45)
+    local autoBtn=mk("TextButton",{Text="START AUTONOMOUS",Font=BOLD,TextSize=11,TextColor3=Color3.new(1,1,1),
+        AutoButtonColor=false,BackgroundTransparency=1,BorderSizePixel=0,Size=UDim2.fromScale(1,1),ZIndex=2,
+        TextStrokeTransparency=0.6,TextStrokeColor3=Color3.new(0,0,0)},autoWrap)
+    autoBtn.MouseButton1Click:Connect(function() setAuto(not autoEnabled) end)
+    -- global refresh for UI chrome
+    addRef(function()
+        local pg=pages[curPage]
+        titleLbl.Text=pg.ta..'<font color="'..rgbStr(accSoft())..'">'..pg.tb..'</font>'
+        for i,p in ipairs(pages) do
+            p.bar.Visible=(i==curPage)
+            for j,s in ipairs(p.subs) do
+                s.frame.Visible=(i==curPage and j==p.cur)
+                s.frame.ScrollBarImageColor3=acc()
+                local on=(j==p.cur)
+                s.btn.BackgroundTransparency=on and 0 or 1
+                s.btn.BackgroundColor3=accDim()
+                s.btn.TextColor3=on and Color3.new(1,1,1) or SUB
+            end
+        end
+        for i,n in ipairs(navBtns) do
+            local on=(i==curPage)
+            n.btn.BackgroundTransparency=on and 0.45 or 1
+            n.btn.BackgroundColor3=accDim()
+            n.tx.TextColor3=on and Color3.new(1,1,1) or SUB
+            n.paint(on and accSoft() or SUB)
+        end
+        TweenService:Create(indicator,TweenInfo.new(0.2,Enum.EasingStyle.Quad),{Position=UDim2.fromOffset(SB-3,92+(curPage-1)*40+math.floor((NAVH-18)/2))}):Play()
+        markerStroke.Color=acc()
+        statusLbl.TextColor3=acc()
+        autoStroke.Color=acc()
+        local dark=Color3.fromRGB(14,16,34)
+        autoGrad.Color=ColorSequence.new(autoEnabled and acc():Lerp(dark,0.45) or accDim(),Color3.fromRGB(16,19,40))
+        autoBtn.Text=autoEnabled and "STOP AUTONOMOUS" or "START AUTONOMOUS"
+    end)
+    ---------------------------------------------------- element factory
+    local function baseRow(sub)
+        sub.order+=1
+        local f=mk("Frame",{BackgroundColor3=Color3.new(1,1,1),BorderSizePixel=0,LayoutOrder=sub.order},sub.frame)
+        glass(f,10,Color3.fromRGB(30,34,64),Color3.fromRGB(16,18,36))
+        return f
+    end
+    local function rowLabel(f,text,reserve)
+        local l=label(f,text,UDim2.fromOffset(12,0),UDim2.new(1,-(12+reserve),1,0),11,TXT)
+        l.TextTruncate=Enum.TextTruncate.AtEnd
+        return l
+    end
+    local TW,TH=(TOUCH and 44 or 36),(TOUCH and 24 or 18)
+    local function addToggle(sub,text,get,set,locked)
+        local f=baseRow(sub)
+        rowLabel(f,text,TW+20)
+        local pillF=mk("Frame",{Size=UDim2.fromOffset(TW,TH),Position=UDim2.new(1,-(TW+12),0.5,-TH/2),BackgroundColor3=OFFC,BorderSizePixel=0},f)
+        corner(pillF,TH/2)
+        local knob=mk("Frame",{Size=UDim2.fromOffset(TH-4,TH-4),Position=UDim2.fromOffset(2,2),BackgroundColor3=Color3.new(1,1,1),BorderSizePixel=0},pillF)
+        corner(knob,(TH-4)/2)
+        addRef(function()
+            local on=get()
+            TweenService:Create(pillF,TweenInfo.new(0.15),{BackgroundColor3=on and accDim():Lerp(acc(),0.6) or OFFC}):Play()
+            TweenService:Create(knob,TweenInfo.new(0.15),{Position=on and UDim2.fromOffset(TW-TH+2,2) or UDim2.fromOffset(2,2)}):Play()
+        end)
+        local hit=mk("TextButton",{Text="",BackgroundTransparency=1,Size=UDim2.fromScale(1,1)},f)
+        hit.MouseButton1Click:Connect(function()
+            if locked and locked() then notify("Dikunci ON selama Autonomous aktif") return end
+            set(not get())
+            saveCfg()
+            refreshUI()
+        end)
+    end
+    local CYW,CYH=(TOUCH and 112 or 104),(TOUCH and 30 or 24)
+    local function addCycle(sub,text,key,opts,onCh)
+        local f=baseRow(sub)
+        rowLabel(f,text,CYW+14)
+        local b=mk("TextButton",{Text="",Font=BOLD,TextSize=10,AutoButtonColor=true,BorderSizePixel=0,
+            Size=UDim2.fromOffset(CYW,CYH),Position=UDim2.new(1,-(CYW+8),0.5,-CYH/2),BackgroundColor3=Color3.fromRGB(26,30,58),TextColor3=accSoft()},f)
+        corner(b,CYH/2) stroke(b,LINE,1,0.6)
+        addRef(function() b.Text=tostring(opts[cfg[key]] or "?") b.TextColor3=accSoft() end)
+        b.MouseButton1Click:Connect(function()
+            cfg[key]=cfg[key]%#opts+1
+            if onCh then onCh() end
+            saveCfg()
+            refreshUI()
+        end)
+    end
+    local SBS=TOUCH and 30 or 22
+    local function smallBtn(parent,text,pos)
+        local b=mk("TextButton",{Text=text,Font=BOLD,TextSize=14,TextColor3=TXT,AutoButtonColor=true,BorderSizePixel=0,
+            Size=UDim2.fromOffset(SBS,SBS),Position=pos,BackgroundColor3=Color3.fromRGB(32,37,70)},parent)
+        corner(b,SBS/2)
+        return b
+    end
+    local function addStepper(sub,text,key,mn,mx,step,fmt,onCh)
+        local f=baseRow(sub)
+        rowLabel(f,text,SBS*2+46+16)
+        local minus=smallBtn(f,"-",UDim2.new(1,-(SBS*2+46+10),0.5,-SBS/2))
+        local val=mk("TextLabel",{Font=HEAD,TextSize=12,TextColor3=TXT,BackgroundTransparency=1,
+            Size=UDim2.fromOffset(46,SBS),Position=UDim2.new(1,-(SBS+10+46),0.5,-SBS/2),Text=""},f)
+        local plus=smallBtn(f,"+",UDim2.new(1,-(SBS+10),0.5,-SBS/2))
+        addRef(function() val.Text=fmt and fmt(cfg[key]) or tostring(cfg[key]) end)
+        local function bump(d)
+            local v=cfg[key]+d*step
+            v=math.max(mn,math.min(mx,v))
+            cfg[key]=math.floor(v*100+0.5)/100
+            if onCh then onCh() end
+            saveCfg()
+            refreshUI()
+        end
+        minus.MouseButton1Click:Connect(function() bump(-1) end)
+        plus.MouseButton1Click:Connect(function() bump(1) end)
+    end
+    local function addButton(sub,text,fn,primary)
+        sub.order+=1
+        local b=mk("TextButton",{Text=text,Font=BOLD,TextSize=TOUCH and 12 or 11,TextColor3=TXT,AutoButtonColor=true,BorderSizePixel=0,
+            BackgroundColor3=primary and accDim() or Color3.fromRGB(24,28,54),LayoutOrder=sub.order},sub.frame)
+        corner(b,10)
+        local s=stroke(b,primary and acc() or LINE,1,primary and 0.4 or 0.55)
+        if primary then addRef(function() b.BackgroundColor3=accDim() s.Color=acc() end) end
+        b.MouseButton1Click:Connect(function() task.spawn(fn) end)
+    end
+    local fmtS=function(v) return v.."s" end
+    local function doRelayout() if relayout then relayout() end end
+    -- TELEPORT / STAGES
+    local S=P1.subs[1]
+    addCycle(S,"Teleport Mode","tpMode",{"INSTANT","FLY"})
+    addButton(S,"Next Stage (Start)",function() manualStage(true,false) end,true)
+    addButton(S,"Next Stage Exit (Stop)",function() manualStage(true,true) end)
+    addButton(S,"Current Stage (Start)",function() manualStage(false,false) end)
+    addButton(S,"Lobby / Start",manualLobby)
+    -- TELEPORT / FINISH
+    S=P1.subs[2]
+    addButton(S,"Finish Steps ["..STEP_INDEX.."]",manualSteps,true)
+    addButton(S,"Finish Glow (touch)",manualGlow)
+    addButton(S,"Finish Pad ["..FINISH_INDEX.."] (Fly)",manualPad)
+    addButton(S,"Press Skip Round (test)",function() pressSkipRound() end)
+    addButton(S,"Cancel Flight",function() cancelFlight() end)
+    -- AUTO / CORE
+    S=P2.subs[1]
+    addToggle(S,"Autonomous",function() return autoEnabled end,function(v) setAuto(v) end)
+    addCycle(S,"Method","autoMethod",{"FLY","INSTANT"})
+    addCycle(S,"Target","autoTarget",{"START","STOP"})
+    addToggle(S,"Resume After Death",function() return cfg.resumeAfterDeath end,function(v) cfg.resumeAfterDeath=v end)
+    addStepper(S,"Auto Fly Speed","autoSpeed",20,250,5)
+    addStepper(S,"Delay Min","autoDelayMin",0,60,1,fmtS,function() if cfg.autoDelayMin>cfg.autoDelayMax then cfg.autoDelayMax=cfg.autoDelayMin end end)
+    addStepper(S,"Delay Max","autoDelayMax",0,60,1,fmtS,function() if cfg.autoDelayMax<cfg.autoDelayMin then cfg.autoDelayMin=cfg.autoDelayMax end end)
+    -- AUTO / FINISH
+    S=P2.subs[2]
+    addCycle(S,"Finish Target","finishMode",FINISH_NAMES)
+    addCycle(S,"Steps Move","stepsMove",{"TP","FLY"})
+    addCycle(S,"Glow Move","glowMove",{"TP","FLY"})
+    addStepper(S,"Steps Walk Min","topWalkMin",0,15,1,fmtS,function() if cfg.topWalkMin>cfg.topWalkMax then cfg.topWalkMax=cfg.topWalkMin end end)
+    addStepper(S,"Steps Walk Max","topWalkMax",1,20,1,fmtS,function() if cfg.topWalkMax<cfg.topWalkMin then cfg.topWalkMin=cfg.topWalkMax end end)
+    addStepper(S,"Finish Hold","finishHold",0.5,10,0.5,fmtS)
+    addToggle(S,"Return After Touch",function() return cfg.finishReturn end,function(v) cfg.finishReturn=v end)
+    -- AUTO / ROUND
+    S=P2.subs[3]
+    addToggle(S,"Auto Skip Round",function() return cfg.autoSkip end,function(v) cfg.autoSkip=v end)
+    addStepper(S,"Skip Delay","skipDelay",0,15,0.5,fmtS)
+    addToggle(S,"Auto Off When Done",function() return cfg.autoOffWhenDone end,function(v) cfg.autoOffWhenDone=v end)
+    addStepper(S,"New Round Delay","newRoundDelay",0,30,1,fmtS)
+    -- AUTO / GUARD
+    S=P2.subs[4]
+    addToggle(S,"Desync Guard",function() return cfg.syncGuard end,function(v) cfg.syncGuard=v end)
+    addStepper(S,"Resets To Trigger","syncDeaths",1,6,1)
+    addStepper(S,"Time Window","syncWindow",10,120,5,fmtS)
+    addStepper(S,"Restart Delay","syncDelay",0,15,1,fmtS)
+    -- SETTINGS / GENERAL
+    S=P3.subs[1]
+    addToggle(S,"Anti-Death",function() return cfg.antiDeath or autoEnabled end,
+        function(v) cfg.antiDeath=v syncAnti() end,function() return autoEnabled end)
+    addToggle(S,"Anti AFK",function() return cfg.antiAfk end,function(v) cfg.antiAfk=v end)
+    addToggle(S,"Noclip While Flying",function() return cfg.noclip end,function(v) cfg.noclip=v end)
+    addStepper(S,"Manual Fly Speed","flySpeed",20,300,10)
+    addCycle(S,"Stage Order","orderMode",{"AUTO","INDEX (i)","HEIGHT"},function() getSections(true) end)
+    -- SETTINGS / LOOK
+    S=P3.subs[2]
+    local accNames={}
+    for i,a in ipairs(ACCENTS) do accNames[i]=a.n end
+    addCycle(S,"Theme","accentIndex",accNames)
+    addStepper(S,"Glass Transparency","transparency",0,0.8,0.05)
+    addCycle(S,"UI Scale","uiScaleMode",UI_SCALE_NAMES,doRelayout)
+    addCycle(S,"Layout","layoutMode",LAYOUT_NAMES,doRelayout)
+    addCycle(S,"Float Button","floatBtn",FAB_NAMES,doRelayout)
+    addToggle(S,"Notifications",function() return cfg.notifications end,function(v) cfg.notifications=v end)
+    addCycle(S,"Menu Key","menuKey",MENU_KEYS)
+    -- SETTINGS / CONFIG
+    S=P3.subs[3]
+    local function resetPositions()
+        cfg.uiX,cfg.uiY=-1,-1
+        cfg.fabX,cfg.fabY=-1,-1
+        local vp=viewport()
+        local s=uiScale.Scale
+        local x,y=clampPos((vp.X-winW*s)/2,(vp.Y-winH*s)/2)
+        root.Position=UDim2.fromOffset(x,y)
+        local fx,fy=fabDefault()
+        fab.Position=UDim2.fromOffset(fx,fy)
+        saveCfg()
+        notify("Posisi UI di-reset")
+    end
+    addButton(S,"Reset Settings",function()
+        local keep={uiX=true,uiY=true,fabX=true,fabY=true}
+        for k,v in pairs(DEFAULTS) do if not keep[k] then cfg[k]=v end end
+        syncAnti()
+        saveCfg()
+        doRelayout()
+        refreshUI()
+        notify("Settings di-reset")
+    end)
+    addButton(S,"Reset UI Position",resetPositions)
+    addButton(S,"Unload Script",function() if env.__STP_Unload then env.__STP_Unload() end end,true)
+    ---------------------------------------------------- toast
+    local toastHolder=mk("Frame",{Size=UDim2.fromOffset(340,200),AnchorPoint=Vector2.new(0.5,0),Position=UDim2.new(0.5,0,0,14),BackgroundTransparency=1},gui)
+    local toastScale=mk("UIScale",{Scale=1},toastHolder)
+    mk("UIListLayout",{Padding=UDim.new(0,5),HorizontalAlignment=Enum.HorizontalAlignment.Center,SortOrder=Enum.SortOrder.LayoutOrder},toastHolder)
+    toastFn=function(text)
+        local l=mk("Frame",{Size=UDim2.fromOffset(320,30),BackgroundColor3=Color3.fromRGB(14,17,36),BackgroundTransparency=0.05,BorderSizePixel=0},toastHolder)
+        corner(l,15)
+        local s=stroke(l,acc(),1,0.45)
+        local dotf=mk("Frame",{Size=UDim2.fromOffset(6,6),Position=UDim2.fromOffset(13,12),BackgroundColor3=acc(),BorderSizePixel=0},l)
+        corner(dotf,3)
+        local t=mk("TextLabel",{Text=text,Font=BODY,TextSize=12,TextColor3=TXT,BackgroundTransparency=1,
+            Position=UDim2.fromOffset(28,0),Size=UDim2.new(1,-38,1,0),TextXAlignment=Enum.TextXAlignment.Left,
+            TextTruncate=Enum.TextTruncate.AtEnd},l)
+        task.delay(3,function()
+            pcall(function()
+                if not l.Parent then return end
+                local ti=TweenInfo.new(0.3)
+                TweenService:Create(l,ti,{BackgroundTransparency=1}):Play()
+                TweenService:Create(t,ti,{TextTransparency=1}):Play()
+                TweenService:Create(s,ti,{Transparency=1}):Play()
+                TweenService:Create(dotf,ti,{BackgroundTransparency=1}):Play()
+                task.wait(0.32)
+                l:Destroy()
+            end)
+        end)
+    end
+    ---------------------------------------------------- relayout (auto scale + compact + clamp)
+    relayout=function()
+        compact=wantCompact()
+        H=compact and H_COMPACT or H_FULL
+        winW,winH=(minimized and MINI_W or W),(minimized and MINI_H or H)
+        sidebar.Visible=not minimized
+        content.Visible=not minimized
+        divider.Visible=not minimized
+        mini.Visible=minimized
+        sidebar.Size=UDim2.fromOffset(SB,H)
+        content.Size=UDim2.fromOffset(CW,H)
+        divider.Size=UDim2.fromOffset(1,math.max(0,H-112))
+        local scY=H-56-10-78
+        statusHdr.Position=UDim2.fromOffset(24,scY-18)
+        statusCard.Position=UDim2.fromOffset(12,scY)
+        autoWrap.Position=UDim2.fromOffset(12,H-56)
+        dash.Visible=not compact
+        local sy=compact and (82+BARH+8) or SCROLL_Y
+        for _,pg in ipairs(pages) do
+            for _,s in ipairs(pg.subs) do
+                s.frame.Position=UDim2.fromOffset(PAD,sy)
+                s.frame.Size=UDim2.fromOffset(GW,math.max(40,H-sy-14))
+            end
+        end
+        local sc=computeScale()
+        uiScale.Scale=sc
+        main.Size=UDim2.fromOffset(winW,winH)
+        root.Size=UDim2.fromOffset(winW*sc,winH*sc)
+        mainCorner.CornerRadius=UDim.new(0,minimized and math.floor(MINI_H/2) or 22)
+        local x,y=clampPos(root.Position.X.Offset,root.Position.Y.Offset)
+        root.Position=UDim2.fromOffset(x,y)
+        local fx,fy=clampFab(fab.Position.X.Offset,fab.Position.Y.Offset)
+        fab.Position=UDim2.fromOffset(fx,fy)
+        toastScale.Scale=math.clamp((viewport().X-16)/340,0.5,1)
+        updateFab()
+    end
+    gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function() relayout() end)
+    if cam then
+        addConn(cam:GetPropertyChangedSignal("ViewportSize"):Connect(function() relayout() end))
+    end
+    ---------------------------------------------------- HUD loop
+    local rng=Random.new()
+    local function updateHUD()
+        local a=acc()
+        if not compact and not minimized then
+            local list=getSections()
+            local n=#list
+            if barCount~=n then rebuildBars(n) end
+            local idx=currentIndex()
+            local cur=idx and list[idx]
+            local nx=idx and list[idx+1]
+            chipNow.Text="NOW  "..(cur and cur.inst.Name:upper() or "-")
+            chipNext.Text="NEXT  "..(nx and nx.inst.Name:upper() or (idx and "FINISH" or "-"))
+            for i,b in ipairs(bars) do
+                b.BackgroundColor3=(idx and i<idx and a) or (idx==i and Color3.new(1,1,1)) or DIM
+            end
+            if idx and bars[idx] then
+                marker.Visible=true
+                marker.Position=UDim2.new((idx-0.5)/n,-1,1-barH[idx],-7)
+            else
+                marker.Visible=false
+            end
+            vStage.Text=(idx and idx or "-").."/"..n
+            cStage.Text=cur and cur.inst.Name or "no stage"
+            local frac=(idx and n>0) and idx/n or 0
+            for k,b in ipairs(g1) do b.BackgroundColor3=(frac>0 and k/#g1<=frac+0.001) and a or DIM end
+            vLeft.Text=idx and tostring(n-idx) or "-"
+            cLeft.Text="to finish"
+            local lit=(idx and n>0) and math.ceil(((n-idx)/n)*#g2) or 0
+            for k,d in ipairs(g2) do d.BackgroundColor3=(k<=lit) and a or DIM end
+            vAuto.Text=autoEnabled and "ON" or "OFF"
+            vAuto.TextColor3=autoEnabled and a or SUB
+            cAuto.Text=autoEnabled and (st.progress.."/"..n.." climbed") or "standby"
+            for _,w in ipairs(g3) do
+                local h=autoEnabled and (0.2+rng:NextNumber()*0.8) or 0.15
+                w.BackgroundColor3=autoEnabled and a or DIM
+                TweenService:Create(w,TweenInfo.new(0.25),{Size=UDim2.new(0,2,h,0)}):Play()
+            end
+            vAnti.Text="ON"
+            vAnti.TextColor3=a
+            cAnti.Text="protected"
+            ringS.Color=a
+            ringDot.BackgroundColor3=a
+        end
+        statusLbl.Text=statusText
+        miniStatus.Text=statusText
+        fabStroke.Color=autoEnabled and a or LINE
+        fabDot.BackgroundColor3=autoEnabled and a or DIM
+        local now,c=os.clock(),0
+        for _,t in ipairs(st.deaths) do if now-t<=cfg.syncWindow then c+=1 end end
+        if autoEnabled and cfg.syncGuard then
+            guardChip.Text="RESETS "..c.."/"..cfg.syncDeaths
+            guardChip.TextColor3=(c>0) and Color3.fromRGB(255,170,90) or a
+        else
+            guardChip.Text="GUARD IDLE"
+            guardChip.TextColor3=SUB
+        end
+    end
+    task.spawn(function()
+        while not unloaded do
+            pcall(updateHUD)
+            task.wait(0.25)
+        end
+    end)
+    relayout()
+    refreshUI()
+    syncAnti()
+end
+local okUI,errUI=pcall(buildUI)
+if not okUI then warn("[STP] UI error: "..tostring(errUI)) end
+------------------------------------------------------------ UNLOAD
+env.__STP_Unload=function()
+    unloaded=true
+    autoEnabled=false
+    runId+=1
+    pcall(cancelFlight)
+    pcall(setAnti,false)
+    for _,c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+    pcall(function() if gui then gui:Destroy() end end)
+    env.__STP_Unload=nil
+end
+notify("Stage Teleporter v18 loaded")
